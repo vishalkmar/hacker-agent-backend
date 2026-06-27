@@ -1,0 +1,52 @@
+# CypherMind AI — sandbox image (Kali rolling + a practical pentest toolset)
+# Build (after Docker Desktop is running):
+#   cd backend/docker
+#   docker build -t cyphermind/kali:latest -f Dockerfile.kali .
+#
+# Installed in STAGED layers so a heavy package (metasploit) can't blow up the whole build
+# on a memory-constrained Docker/WSL2 — earlier layers cache, and metasploit is best-effort.
+
+FROM kalilinux/kali-rolling
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 1) core / shell utils
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash coreutils curl wget git jq vim less ca-certificates openssl iputils-ping dnsutils \
+    netcat-traditional net-tools whois man-db \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 2) recon / scanning
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nmap masscan dnsrecon dnsenum whatweb amass \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 3) web testing
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nikto gobuster ffuf sqlmap wfuzz dirb \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 4) passwords / hashes
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    hydra john hashcat hash-identifier \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 5) python tooling
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-venv \
+ && apt-get clean && rm -rf /var/lib/apt/lists/* \
+ && pip3 install --no-cache-dir --break-system-packages requests httpx dnspython || true
+
+# 6) exploitation (HEAVY, own layer). exploitdb is light; metasploit is large — retry a couple
+#    of times and keep going even if it fails so the image still builds with everything else.
+RUN apt-get update && apt-get install -y --no-install-recommends exploitdb \
+ && apt-get clean && rm -rf /var/lib/apt/lists/* || true
+RUN for i in 1 2 3; do \
+      apt-get update && apt-get install -y --no-install-recommends metasploit-framework && break; \
+      echo "metasploit attempt $i failed, retrying…"; sleep 5; \
+    done; apt-get clean && rm -rf /var/lib/apt/lists/* || true
+
+WORKDIR /workspace
+
+# Keep the container alive so the app can `docker exec` into it.
+CMD ["sleep", "infinity"]

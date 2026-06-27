@@ -1,0 +1,7 @@
+backend/_*.mjs
+node_modules/
+
+# env / secrets
+.env
+*.env
+!*.env.example

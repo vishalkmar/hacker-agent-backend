@@ -1,0 +1,47 @@
+# CypherMind AI — FULL Kali arsenal image (kali-linux-everything).
+# This is the HEAVY variant (~10-20 GB, long build). Needs internet at build time only.
+#
+# Build (Docker Desktop running):
+#   cd backend/docker
+#   docker build -t cyphermind/kali-everything:latest -f Dockerfile.kali-everything .
+#   # ...go get a coffee, this pulls thousands of packages...
+#
+# Then point the app at it:
+#   backend/.env -> EXEC_IMAGE=cyphermind/kali-everything:latest  and  EXEC_BACKEND=docker
+#
+# Once built, the container runs offline (reuses the image). You can also restrict its network
+# to a lab subnet via EXEC_NET.
+
+FROM kalilinux/kali-rolling
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+
+# 1) Doc-extraction tooling (man/apt-file) — its own light layer.
+#    (no `tldr` — it's not an apt package on Kali rolling)
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      bash coreutils curl wget git jq vim less ca-certificates openssl \
+      man-db manpages manpages-dev apt-file bash-completion \
+      python3 python3-pip python3-venv \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 2) THE FULL ARSENAL (huge). Own layer. Retried up to 3x for transient network drops, but the
+#    RUN FAILS if all attempts fail (so a broken build is never silently "successful").
+RUN apt-get update \
+ && ( apt-get install -y --no-install-recommends kali-linux-everything \
+      || { echo ">> retry 2…"; sleep 10; apt-get update; apt-get install -y --no-install-recommends kali-linux-everything; } \
+      || { echo ">> retry 3…"; sleep 15; apt-get update; apt-get install -y --no-install-recommends kali-linux-everything; } ) \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 3) apt-file index for doc extraction (non-fatal).
+RUN apt-get update && apt-file update || true; apt-get clean; rm -rf /var/lib/apt/lists/*
+
+# A tiny local lab target so self-tests have something safe to hit (127.0.0.1).
+# (Optional; many tools self-test with --version/--help and need no target.)
+RUN python3 -m pip install --no-cache-dir --break-system-packages requests httpx dnspython || true
+
+WORKDIR /workspace
+
+# Keep the container alive so the app can `docker exec` into it.
+CMD ["sleep", "infinity"]
