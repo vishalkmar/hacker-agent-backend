@@ -9,6 +9,7 @@ import { extractFindings, detectScanner } from '../scan/parsers.js';
 import { extractWebFindings, detectWebScanner } from '../scan/webparsers.js';
 import { extractWirelessFindings, buildWirelessCommand } from '../scan/wireless.js';
 import { retrieveTools } from '../tools/index.js';
+import { runBrowser, fmtBrowser } from '../browser/browser.js';
 import { enrichCvss } from '../scan/cvss.js';
 import { generatePayload, renderPayload, parsePayloadSpec } from '../payloads/templates.js';
 import { generateReport } from '../report/generate.js';
@@ -33,7 +34,7 @@ commands. If a tool like nmap/sqlmap is missing, say so and adapt or install it.
 
 const EXEC_SYSTEM = SYSTEM_PROMPT + EXEC_PROTOCOL_PROMPT + shellNote(env.exec.shell);
 
-const TOOL_TYPES = ['execute', 'search', 'fetch', 'recon', 'scan', 'vulnscan', 'wireless', 'tool', 'payload', 'report'];
+const TOOL_TYPES = ['execute', 'search', 'fetch', 'recon', 'scan', 'vulnscan', 'wireless', 'tool', 'browser', 'payload', 'report'];
 // Models often write a shell command in a plain ```bash/```sh/```shell block instead of
 // ```execute. Treat those as execute so the agent actually RUNS commands (not just prints them).
 const EXEC_ALIASES = new Set(['bash', 'sh', 'shell', 'console', 'terminal']);
@@ -170,6 +171,18 @@ async function runTool({ type, body }, { sessionId, userId }) {
     return { label: 'tool lookup: ' + body, output, exitCode: 0 };
   }
 
+  if (type === 'browser') {
+    // The AI's own headless browser — navigate & inspect live web apps.
+    const r = await runBrowser(sessionId, body);
+    return {
+      label: 'browser: ' + body.split('\n')[0].slice(0, 80),
+      output: fmtBrowser(r),
+      exitCode: r.error && !r.url ? 1 : 0,
+      screenshot: r.screenshot || null,
+      pageUrl: r.url || null,
+    };
+  }
+
   if (type === 'wireless') {
     // body: either a raw aircrack-suite command, or "<action> [iface] [bssid] [channel]".
     let command = body;
@@ -281,6 +294,8 @@ export async function runAgent({ history, sessionId, userId, emit, signal, memor
       });
 
       if (r.findingsAdded > 0) emit('findings', { count: r.findingsAdded });
+      // Live browser view for the UI panel.
+      if (r.screenshot) emit('browser', { url: r.pageUrl, screenshot: r.screenshot });
 
       append(
         '```bash\n' + r.label + '\n```\n```text\n' + (r.output || '(no output)') + '\n```\n' +

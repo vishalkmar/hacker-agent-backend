@@ -64,6 +64,13 @@ export const env = {
     apiVersion: process.env.CASHFREE_API_VERSION || '2023-08-01',
   },
 
+  // ----- AI Browser tool (Playwright) -----
+  browser: {
+    enabled: bool(process.env.BROWSER_ENABLED, true),
+    headless: bool(process.env.BROWSER_HEADLESS, true),
+    timeoutMs: num(process.env.BROWSER_TIMEOUT_MS, 30_000),
+  },
+
   // ----- Email + OTP (Phase 12) -----
   email: {
     host: process.env.SMTP_HOST || '',
