@@ -5,7 +5,7 @@ import { env } from '../../config/env.js';
 import { issueOtp, verifyOtp } from './otp.js';
 import { sendMail, welcomeEmail } from '../email/mailer.js';
 
-const SAFE_USER = 'id, email, display_name, role, daily_message_limit, daily_messages_used, email_verified, created_at';
+const SAFE_USER = 'id, email, display_name, role, daily_message_limit, daily_messages_used, email_verified, consent_version, role_category, referral_source, onboarded_at, created_at';
 
 function planLimit(role) {
   switch (role) {
@@ -49,6 +49,16 @@ export async function updateProfile(id, { display_name, avatar_url }) {
   return getUserById(id);
 }
 
+// Phase 2 · Module 3: save onboarding answers (who they are + how they heard) once.
+export async function saveOnboarding(id, { role_category, referral_source }) {
+  await query(
+    `UPDATE users SET role_category = $1, referral_source = $2, onboarded_at = COALESCE(onboarded_at, now())
+     WHERE id = $3`,
+    [(role_category || '').slice(0, 60) || null, (referral_source || '').slice(0, 120) || null, id]
+  );
+  return getUserById(id);
+}
+
 export async function register({ email, password, name }) {
   const e = String(email || '').trim().toLowerCase();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) throw httpErr(400, 'Valid email is required');
@@ -67,6 +77,41 @@ export async function register({ email, password, name }) {
   );
   const user = await getUserById(id);
   return { user, token: issueToken(user) };
+}
+
+// Bootstrap: seed one admin from .env into the DB if the admins table is empty. The raw env
+// password is only used to create the bcrypt hash — auth always verifies against the DB hash.
+export async function seedAdmin() {
+  if (!env.auth.adminUsername || !env.auth.adminPassword) return;
+  const exists = await query('SELECT id FROM admins WHERE username = $1', [env.auth.adminUsername]);
+  if (exists.length) return;
+  const hash = await bcrypt.hash(env.auth.adminPassword, 10);
+  await query('INSERT INTO admins (id, username, password_hash) VALUES ($1,$2,$3)', [
+    newId(), env.auth.adminUsername, hash,
+  ]);
+  console.log(`Seeded admin "${env.auth.adminUsername}"`);
+}
+
+export async function getAdminById(id) {
+  const rows = await query('SELECT id, username, display_name, last_login FROM admins WHERE id = $1', [id]);
+  return rows[0] || null;
+}
+
+// Separate admin login — verifies username + bcrypt password against the `admins` table (DB),
+// and issues an admin JWT (adm:true). Completely separate from user auth.
+export async function adminLogin({ username, password }) {
+  const rows = await query('SELECT id, username, password_hash FROM admins WHERE username = $1', [
+    String(username || '').trim(),
+  ]);
+  const a = rows[0];
+  if (!a || !(await bcrypt.compare(String(password || ''), a.password_hash))) {
+    throw httpErr(401, 'Invalid admin credentials');
+  }
+  await query('UPDATE admins SET last_login = now() WHERE id = $1', [a.id]);
+  const token = jwt.sign({ sub: a.id, adm: true, username: a.username }, env.auth.jwtSecret, {
+    expiresIn: env.auth.tokenTtl,
+  });
+  return { admin: { id: a.id, username: a.username }, token };
 }
 
 export async function login({ email, password }) {

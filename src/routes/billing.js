@@ -9,13 +9,30 @@ import {
 import {
   createOrder, getOrder, verifyWebhookSignature, cashfreeConfigured, cashfreeMode,
 } from '../services/billing/cashfree.js';
-import { sendMail, receiptEmail } from '../services/email/mailer.js';
+import { sendMail, voucherEmail } from '../services/email/mailer.js';
+import { generateVoucherPdf } from '../services/billing/voucher.js';
+import { query } from '../db/index.js';
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-async function sendReceipt(userId, plan) {
-  const u = await getUserById(userId);
-  if (u?.email) sendMail({ to: u.email, ...receiptEmail(plan.name, plan.price_inr) }).catch(() => {});
+// On a completed payment: generate the PDF voucher/contract, save its number, and email it.
+async function sendVoucher(userId, plan, { orderId, paymentId, amount, expiresAt } = {}) {
+  try {
+    const u = await getUserById(userId);
+    if (!u?.email) return;
+    const { base64, voucherNo } = await generateVoucherPdf({
+      user: u, plan, amount: amount ?? plan.price_inr, orderId, paymentId,
+      purchasedAt: Date.now(), expiresAt,
+    });
+    if (orderId) await query('UPDATE transactions SET voucher_no=$1 WHERE cf_order_id=$2', [voucherNo, orderId]).catch(() => {});
+    await sendMail({
+      to: u.email,
+      ...voucherEmail(plan.name, plan.price_inr, voucherNo),
+      attachments: [{ name: `CypherMind-Voucher-${voucherNo}.pdf`, base64 }],
+    });
+  } catch (e) {
+    console.warn('voucher send failed:', e.message);
+  }
 }
 
 // Public: list active plans (for the pricing page, pre-login).
@@ -64,18 +81,22 @@ billingRouter.post('/checkout', wrap(async (req, res) => {
 billingRouter.get('/verify/:orderId', wrap(async (req, res) => {
   const txn = await getTransactionByOrder(req.params.orderId);
   if (!txn || txn.user_id !== req.userId) return res.status(404).json({ error: 'Order not found' });
-  if (txn.status === 'paid') return res.json({ status: 'paid', alreadyActivated: true });
+  if (txn.status === 'completed') return res.json({ status: 'completed', alreadyActivated: true });
 
   const order = await getOrder(req.params.orderId);
-  const paid = order?.order_status === 'PAID';
-  if (paid) {
+  const st = order?.order_status;
+  if (st === 'PAID') {
     const plan = await getPlan(txn.plan_code);
-    await markTransaction(txn.cf_order_id, { status: 'paid', raw: order });
-    await activateSubscription(req.userId, plan);
-    sendReceipt(req.userId, plan);
-    return res.json({ status: 'paid', plan: plan.code });
+    await markTransaction(txn.cf_order_id, { status: 'completed', raw: order });
+    const { expires_at } = await activateSubscription(req.userId, plan);
+    sendVoucher(req.userId, plan, { orderId: txn.cf_order_id, amount: txn.amount, expiresAt: expires_at });
+    return res.json({ status: 'completed', plan: plan.code });
   }
-  res.json({ status: order?.order_status || 'pending' });
+  if (st === 'EXPIRED' || st === 'FAILED' || st === 'CANCELLED') {
+    await markTransaction(txn.cf_order_id, { status: 'cancelled', raw: order });
+    return res.json({ status: 'cancelled' });
+  }
+  res.json({ status: 'pending' }); // order still ACTIVE / awaiting payment
 }));
 
 // Cashfree webhook (mounted with a raw body parser in app.js — req.body is a Buffer).
@@ -92,17 +113,21 @@ export async function cashfreeWebhook(req, res) {
     const payStatus = payload?.data?.payment?.payment_status || payload?.data?.order?.order_status;
     if (orderId && /SUCCESS|PAID/i.test(payStatus || '')) {
       const txn = await getTransactionByOrder(orderId);
-      if (txn && txn.status !== 'paid') {
+      if (txn && txn.status !== 'completed') {
         const plan = await getPlan(txn.plan_code);
+        const paymentId = payload?.data?.payment?.cf_payment_id;
         await markTransaction(orderId, {
-          status: 'paid',
-          cfPaymentId: payload?.data?.payment?.cf_payment_id,
+          status: 'completed',
+          cfPaymentId: paymentId,
           method: payload?.data?.payment?.payment_group,
           raw: payload,
         });
-        await activateSubscription(txn.user_id, plan);
-        sendReceipt(txn.user_id, plan);
+        const { expires_at } = await activateSubscription(txn.user_id, plan);
+        sendVoucher(txn.user_id, plan, { orderId, paymentId, amount: txn.amount, expiresAt: expires_at });
       }
+    } else if (orderId && /FAIL|CANCEL|EXPIRE/i.test(payStatus || '')) {
+      const txn = await getTransactionByOrder(orderId);
+      if (txn && txn.status === 'pending') await markTransaction(orderId, { status: 'cancelled', raw: payload });
     }
     res.json({ ok: true });
   } catch (e) {

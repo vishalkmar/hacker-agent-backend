@@ -41,12 +41,18 @@ export async function getActiveSubscription(userId) {
 }
 
 // Activate (or extend) a subscription and sync the user's role + daily limit.
-export async function activateSubscription(userId, plan) {
+// opts.days: admin override for custom validity (else 30-day monthly / null for free/lifetime).
+export async function activateSubscription(userId, plan, opts = {}) {
   // Cancel any existing active subs for a clean state.
   await query(`UPDATE subscriptions SET status='cancelled' WHERE user_id=$1 AND status='active'`, [userId]);
-  const expires = plan.period === 'lifetime' || plan.code === 'free'
-    ? null
-    : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // monthly
+  let expires;
+  if (opts.days && Number(opts.days) > 0) {
+    expires = new Date(Date.now() + Number(opts.days) * 24 * 60 * 60 * 1000);
+  } else {
+    expires = plan.period === 'lifetime' || plan.code === 'free'
+      ? null
+      : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // monthly
+  }
   await query(
     `INSERT INTO subscriptions (id, user_id, plan_code, status, expires_at) VALUES ($1,$2,$3,'active',$4)`,
     [newId(), userId, plan.code, expires]
@@ -87,7 +93,7 @@ export async function expireDueSubscriptions(freeLimit = 50) {
 export async function createTransaction({ userId, planCode, amount, cfOrderId }) {
   const id = newId();
   await query(
-    `INSERT INTO transactions (id, user_id, plan_code, amount, cf_order_id) VALUES ($1,$2,$3,$4,$5)`,
+    `INSERT INTO transactions (id, user_id, plan_code, amount, cf_order_id, status) VALUES ($1,$2,$3,$4,$5,'pending')`,
     [id, userId, planCode, amount, cfOrderId]
   );
   return id;

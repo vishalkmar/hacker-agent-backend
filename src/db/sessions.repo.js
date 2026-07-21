@@ -42,3 +42,13 @@ export async function deleteSession(userId, sessionId) {
   ]);
   return res.length > 0;
 }
+
+// Phase 2 · Module 4: retention — delete sessions (and their messages, via ON DELETE CASCADE)
+// with no activity in the last `days` days. Long-term memory_chunks survive (session_id -> NULL).
+export async function purgeOldSessions(days = 30) {
+  const res = await query(
+    `DELETE FROM sessions WHERE updated_at < now() - ($1 || ' days')::interval RETURNING id`,
+    [String(days)]
+  );
+  return res.length;
+}

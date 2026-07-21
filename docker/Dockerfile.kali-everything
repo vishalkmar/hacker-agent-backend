@@ -41,6 +41,23 @@ RUN apt-get update && apt-file update || true; apt-get clean; rm -rf /var/lib/ap
 # (Optional; many tools self-test with --version/--help and need no target.)
 RUN python3 -m pip install --no-cache-dir --break-system-packages requests httpx dnspython || true
 
+# OSINT arsenal: PhoneInfoga (Go binary) + pipx people-recon tools for the ```osint sweep.
+RUN cd /tmp \
+ && (curl -fsSL https://raw.githubusercontent.com/sundowndev/phoneinfoga/master/support/scripts/install | bash \
+      && install -m755 ./phoneinfoga /usr/local/bin/phoneinfoga) || true \
+ && pip install --no-cache-dir --break-system-packages holehe maigret h8mail sherlock-project theHarvester || true
+
+# BeEF (Browser Exploitation Framework) — needs `bundle install` for its modern gem set (slow one-time build).
+RUN apt-get update \
+ && apt-get install -y beef-xss build-essential ruby-dev bundler libssl-dev libpcap-dev \
+ && ( cd /usr/share/beef-xss && bundle config set --local frozen false && bundle install \
+      && sed -i 's/passwd: *".*"/passwd: "CypherM1nd!"/; s/user: *".*"/user: "beef"/' config.yaml ) \
+    || echo "WARN: beef bundle install incomplete" \
+ ; apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# OWASP ZAP — CLI/headless Burp-Scanner equivalent (zaproxy -cmd -quickurl).
+RUN apt-get update && apt-get install -y zaproxy && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /workspace
 
 # Keep the container alive so the app can `docker exec` into it.

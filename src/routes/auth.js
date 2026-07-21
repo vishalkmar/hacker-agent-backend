@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { register, login, getUserById, startOtp, verifyOtpLogin, updateProfile } from '../services/auth/auth.js';
+import { register, login, adminLogin, getUserById, startOtp, verifyOtpLogin, updateProfile, saveOnboarding } from '../services/auth/auth.js';
 import { issueOtp } from '../services/auth/otp.js';
 import { currentUser } from '../middleware/currentUser.js';
 
@@ -54,6 +54,15 @@ authRouter.post(
   })
 );
 
+// POST /api/auth/admin-login { username, password }  (DB-backed, separate from user auth)
+authRouter.post(
+  '/admin-login',
+  wrap(async (req, res) => {
+    const { admin, token } = await adminLogin(req.body || {});
+    res.json({ admin, token });
+  })
+);
+
 // GET /api/auth/me  (resolves the user from the token)
 authRouter.get(
   '/me',
@@ -71,6 +80,16 @@ authRouter.patch(
   currentUser,
   wrap(async (req, res) => {
     const user = await updateProfile(req.userId, req.body || {});
+    res.json({ user });
+  })
+);
+
+// POST /api/auth/onboarding  { role_category, referral_source }
+authRouter.post(
+  '/onboarding',
+  currentUser,
+  wrap(async (req, res) => {
+    const user = await saveOnboarding(req.userId, req.body || {});
     res.json({ user });
   })
 );

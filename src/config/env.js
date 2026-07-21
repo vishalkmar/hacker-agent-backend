@@ -24,6 +24,28 @@ function bool(value, fallback) {
   return /^(1|true|yes|on)$/i.test(String(value).trim());
 }
 
+// Build the LLM failover chain (highest priority first). Numbered LLM_<n>_MODEL entries win
+// (each may carry its own BASE_URL/API_KEY for a different provider); otherwise fall back to
+// the comma-separated LLM_MODELS (or single LLM_MODEL) on the default endpoint.
+function buildLlmChain() {
+  const defBase = (process.env.LLM_BASE_URL || '').trim();
+  const defKey = (process.env.LLM_API_KEY || '').trim();
+  const numbered = [];
+  for (let i = 1; i <= 20; i++) {
+    const model = process.env[`LLM_${i}_MODEL`];
+    if (!model || !model.trim()) continue;
+    numbered.push({
+      model: model.trim(),
+      baseUrl: (process.env[`LLM_${i}_BASE_URL`] || defBase).trim(),
+      apiKey: (process.env[`LLM_${i}_API_KEY`] || defKey).trim(),
+    });
+  }
+  if (numbered.length) return numbered;
+  const models = (process.env.LLM_MODELS || process.env.LLM_MODEL || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  return models.map((model) => ({ model, baseUrl: defBase, apiKey: defKey }));
+}
+
 // Default shell if EXEC_SHELL is not set.
 // Prefer bash everywhere — the agent thinks in Unix/Kali commands (curl, grep, sed, awk).
 // On Windows, Git Bash provides the full Unix toolset; fall back to PowerShell if absent.
@@ -53,6 +75,9 @@ export const env = {
     // Phase 15: emails that get the admin panel (comma-separated).
     adminEmails: (process.env.ADMIN_EMAILS || '')
       .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+    // Direct admin login (username/password from .env).
+    adminUsername: process.env.ADMIN_USERNAME || '',
+    adminPassword: process.env.ADMIN_PASSWORD || '',
   },
 
   // ----- Billing / Cashfree (Phase 13) -----
@@ -73,8 +98,11 @@ export const env = {
 
   // ----- Email + OTP (Phase 12) -----
   email: {
-    host: process.env.SMTP_HOST || '',
-    port: num(process.env.SMTP_PORT, 587),
+    // Brevo transactional API (preferred when set).
+    brevoApiKey: process.env.BREVO_API_KEY || '',
+    // SMTP fallback (Brevo SMTP relay or any SMTP).
+    host: process.env.SMTP_HOST || process.env.BREVO_SMTP_HOST || '',
+    port: num(process.env.SMTP_PORT || process.env.BREVO_SMTP_PORT, 587),
     user: process.env.SMTP_USER || '',
     pass: process.env.SMTP_PASS || '',
     from: process.env.EMAIL_FROM || 'CypherMind <no-reply@cyphermind.local>',
@@ -90,7 +118,21 @@ export const env = {
     provider: (process.env.LLM_PROVIDER || 'mock').toLowerCase(),
     baseUrl: process.env.LLM_BASE_URL || '',
     apiKey: process.env.LLM_API_KEY || '',
-    model: process.env.LLM_MODEL || '',
+    // Multi-provider failover CHAIN, highest priority first. Two ways to configure:
+    //  1) Numbered entries — each can point at a DIFFERENT company/endpoint:
+    //       LLM_1_MODEL / LLM_1_BASE_URL / LLM_1_API_KEY, LLM_2_MODEL / ... (url+key optional,
+    //       default to LLM_BASE_URL / LLM_API_KEY). Use this to mix NVIDIA + OpenRouter + others.
+    //  2) LLM_MODELS (comma-separated) OR single LLM_MODEL — all on the default endpoint.
+    // A model that hangs (no first token in firstTokenTimeoutMs) or errors falls over to the next.
+    chain: buildLlmChain(),
+    models: buildLlmChain().map((c) => c.model),
+    model: buildLlmChain()[0]?.model || '',
+    // How long to wait for the FIRST streamed token before failing over to the next model.
+    firstTokenTimeoutMs: num(process.env.LLM_FIRST_TOKEN_TIMEOUT_MS, 25_000),
+    // Nemotron reasoning models stream their thinking in `reasoning_content` (not `content`),
+    // which caused "empty response"/false-"hang" failovers. Disabling thinking makes them stream
+    // the answer directly (faster, reliable). Our agent loop provides the reasoning structure.
+    disableThinking: bool(process.env.LLM_DISABLE_THINKING, true),
     temperature: num(process.env.LLM_TEMPERATURE, 0.4),
     maxTokens: num(process.env.LLM_MAX_TOKENS, 2048),
     // Vision (Phase 11): a multimodal model for understanding uploaded images.
@@ -98,6 +140,12 @@ export const env = {
     visionModel: process.env.VISION_MODEL || '',
     visionBaseUrl: process.env.VISION_BASE_URL || process.env.LLM_BASE_URL || '',
     visionApiKey: process.env.VISION_API_KEY || process.env.LLM_API_KEY || '',
+    // Optional server-side speech-to-text (mic). Any OpenAI-compatible /audio/transcriptions endpoint
+    // (e.g. Groq's free Whisper) — auto-detects the spoken language. The chat mic uses the browser Web
+    // Speech API by default; this is the fallback for browsers without it.
+    sttModel: process.env.STT_MODEL || 'whisper-large-v3',
+    sttBaseUrl: process.env.STT_BASE_URL || '',
+    sttApiKey: process.env.STT_API_KEY || '',
   },
 
   // ----- Execution engine (Phase 1.5): lets the AI run real shell commands -----
@@ -108,8 +156,10 @@ export const env = {
     workspace: path.resolve(backendRoot, process.env.EXEC_WORKSPACE || './workspace'),
     timeoutMs: num(process.env.EXEC_TIMEOUT_MS, 120_000),
     maxOutputBytes: num(process.env.EXEC_MAX_OUTPUT_BYTES, 200_000),
-    // Max execute->observe iterations per chat turn (stops runaway loops).
-    maxSteps: num(process.env.EXEC_MAX_STEPS, 8),
+    // Max execute->observe iterations per chat turn (stops runaway loops). Big assessments
+    // ("test all vulns on this site") need room; on hitting the cap the agent now still writes a
+    // findings summary instead of stopping abruptly.
+    maxSteps: num(process.env.EXEC_MAX_STEPS, 20),
     // Larger budget for autonomous Autopilot runs (Phase 8).
     maxStepsAutopilot: num(process.env.EXEC_MAX_STEPS_AUTOPILOT, 25),
     // Block commands that would destroy the host machine (protects YOUR box).
@@ -119,8 +169,21 @@ export const env = {
     backend: (process.env.EXEC_BACKEND || 'auto').toLowerCase(), // auto | host | docker
     image: process.env.EXEC_IMAGE || 'cyphermind/kali:latest',
     net: process.env.EXEC_NET || 'bridge', // bridge | none | host
+    // Grant NET_RAW/NET_ADMIN + seccomp=unconfined so scanners (nmap SYN, masscan, hping,
+    // aircrack) actually work in the sandbox. Off = locked-down (SYN scans fail).
+    netCaps: bool(process.env.EXEC_NET_CAPS, true),
     mem: process.env.EXEC_MEM || '2g',
     cpus: process.env.EXEC_CPUS || '2',
+    // Wi-Fi passthrough: to run REAL wireless attacks (airodump/aireplay/reaver) the container must see the
+    // host's monitor-capable radio. Set EXEC_WIFI=true to launch the sandbox with --privileged --net=host so a
+    // USB adapter attached to the exec host is usable. Only meaningful on a Linux exec host with such an
+    // adapter (a cloud VM / Windows-WSL host has no radio, so leave it off). Off by default (safer isolation).
+    wifi: bool(process.env.EXEC_WIFI, false),
+    // Wordlist (rockyou) bind-mounted read-only into the sandbox at the standard Kali path, so every crack
+    // command (hashcat/john/hydra) that references /usr/share/wordlists/rockyou.txt just works — uncompressed
+    // and guaranteed present. Defaults to backend/rockyou.txt if the user dropped it there.
+    wordlist: path.resolve(backendRoot, process.env.EXEC_WORDLIST || './rockyou.txt'),
+    wordlistMount: process.env.EXEC_WORDLIST_MOUNT || '/usr/share/wordlists/rockyou.txt',
 
     // ----- Phase 8: SSH "full OS" backend -----
     ssh: {
@@ -129,6 +192,13 @@ export const env = {
       port: process.env.SSH_PORT || '22',
       key: process.env.SSH_KEY || '',
     },
+  },
+
+  // ----- Shodan (OSINT/recon): internet-wide device/service intelligence via api.shodan.io -----
+  shodan: {
+    apiKey: process.env.SHODAN_API_KEY || '',
+    baseUrl: process.env.SHODAN_BASE_URL || 'https://api.shodan.io',
+    timeoutMs: num(process.env.SHODAN_TIMEOUT_MS, 15_000),
   },
 
   // ----- Memory engine (Phase 3): cross-session semantic recall -----

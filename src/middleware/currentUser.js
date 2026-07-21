@@ -15,6 +15,7 @@ export function currentUser(req, res, next) {
     if (payload?.sub) {
       req.userId = payload.sub;
       req.userRole = payload.role;
+      req.tokenAdmin = payload.adm === true; // admin JWT (Phase 2B)
       return next();
     }
     return res.status(401).json({ error: 'Invalid or expired token' });

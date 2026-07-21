@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
 import { env } from '../../config/env.js';
+import { sendBrevoEmail } from './brevo.js';
 
 let _transport = null;
 function transport() {
@@ -14,15 +15,31 @@ function transport() {
   return _transport;
 }
 
-// Send an email. In dev (no SMTP) it logs to the console and returns ok so flows still work.
-export async function sendMail({ to, subject, html, text }) {
+// Send an email. Prefers Brevo API, else SMTP, else logs to console (dev) so flows never break.
+// attachments: [{ name, base64 }] (used for the PDF voucher/contract).
+export async function sendMail({ to, subject, html, text, attachments }) {
+  if (env.email.brevoApiKey) {
+    try {
+      const r = await sendBrevoEmail({ to, subject, html, text, attachments });
+      return { sent: true, provider: 'brevo', messageId: r.messageId };
+    } catch (e) {
+      console.warn('Brevo send failed, falling back:', e.message);
+    }
+  }
   const t = transport();
   if (!t) {
     console.log(`\n[email:dev] To: ${to}\n[email:dev] ${subject}\n[email:dev] ${text || ''}\n`);
     return { dev: true };
   }
-  await t.sendMail({ from: env.email.from, to, subject, html, text });
-  return { sent: true };
+  await t.sendMail({
+    from: env.email.from,
+    to,
+    subject,
+    html,
+    text,
+    attachments: attachments?.map((a) => ({ filename: a.name, content: Buffer.from(a.base64, 'base64') })),
+  });
+  return { sent: true, provider: 'smtp' };
 }
 
 const shell = (title, body) => `
@@ -58,6 +75,22 @@ export function receiptEmail(planName, amount) {
        <div style="background:#EFF6FF;border-radius:12px;padding:14px 16px;margin:10px 0;color:#0F172A">
          <b>Amount paid:</b> ₹${amount}<br/><b>Plan:</b> ${planName}
        </div>
+       <a href="${env.email.appBaseUrl}" style="display:inline-block;margin-top:8px;background:#2563EB;color:#fff;text-decoration:none;padding:10px 18px;border-radius:10px;font-weight:600">Open CypherMind</a>`
+    ),
+  };
+}
+
+export function voucherEmail(planName, amount, voucherNo) {
+  return {
+    subject: `Your CypherMind ${planName} plan — voucher ${voucherNo}`,
+    text: `Thank you! Your ${planName} plan is active. Your voucher/contract (${voucherNo}) is attached as a PDF.`,
+    html: shell(
+      'Payment successful — plan active 🎉',
+      `<p style="color:#475569">Thank you! Your <b>${planName}</b> plan is now active.</p>
+       <div style="background:#EFF6FF;border-radius:12px;padding:14px 16px;margin:10px 0;color:#0F172A">
+         <b>Amount:</b> ₹${amount}<br/><b>Voucher No:</b> ${voucherNo}
+       </div>
+       <p style="color:#64748B;font-size:13px">Your voucher &amp; plan contract is attached as a PDF.</p>
        <a href="${env.email.appBaseUrl}" style="display:inline-block;margin-top:8px;background:#2563EB;color:#fff;text-decoration:none;padding:10px 18px;border-radius:10px;font-weight:600">Open CypherMind</a>`
     ),
   };

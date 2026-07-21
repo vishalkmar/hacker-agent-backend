@@ -22,6 +22,13 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS last_daily_reset    DATE NOT NULL DEF
 ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url     TEXT;
 
+-- Phase 2 (launch): legal consent + onboarding profile (additive).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS consent_version TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS consent_at      TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS role_category   TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_source TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarded_at    TIMESTAMPTZ;
+
 CREATE TABLE IF NOT EXISTS email_otps (
   id          TEXT PRIMARY KEY,
   email       TEXT NOT NULL,
@@ -106,6 +113,34 @@ CREATE TABLE IF NOT EXISTS transactions (
 );
 CREATE INDEX IF NOT EXISTS idx_txn_user ON transactions(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_txn_order ON transactions(cf_order_id);
+
+-- Phase 2 · Module 6: normalize transaction statuses -> pending | completed | cancelled.
+ALTER TABLE transactions ALTER COLUMN status SET DEFAULT 'pending';
+UPDATE transactions SET status='completed' WHERE status='paid';
+UPDATE transactions SET status='pending'   WHERE status='created';
+UPDATE transactions SET status='cancelled' WHERE status IN ('failed','expired');
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS voucher_no TEXT;
+
+-- Phase 2B: support chat (WhatsApp-style; sender = user | admin; seen = recipient has read it).
+CREATE TABLE IF NOT EXISTS support_messages (
+  id         TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  sender     TEXT NOT NULL,           -- 'user' | 'admin'
+  content    TEXT NOT NULL,
+  seen       BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_support_user ON support_messages(user_id, created_at ASC);
+
+-- Phase 2B: separate admin accounts (DB-backed; seeded from .env on boot).
+CREATE TABLE IF NOT EXISTS admins (
+  id            TEXT PRIMARY KEY,
+  username      TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  display_name  TEXT NOT NULL DEFAULT 'Administrator',
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_login    TIMESTAMPTZ
+);
 
 CREATE TABLE IF NOT EXISTS sessions (
   id            TEXT PRIMARY KEY,
@@ -221,3 +256,52 @@ CREATE TABLE IF NOT EXISTS reports (
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_reports_session ON reports(session_id, created_at DESC);
+
+-- 2026-07-16: downloadable artifacts (files the AI generates for the user:
+-- wordlists, Excel/Word/PDF/CSV/text exports, or files pulled from the sandbox).
+CREATE TABLE IF NOT EXISTS artifacts (
+  id           TEXT PRIMARY KEY,
+  session_id   TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+  user_id      TEXT REFERENCES users(id) ON DELETE CASCADE,
+  name         TEXT NOT NULL,
+  format       TEXT,                            -- txt | csv | xlsx | docx | pdf | ...
+  mime         TEXT,
+  size_bytes   INTEGER,
+  path         TEXT NOT NULL,                   -- on-disk location under backend/artifacts
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_artifacts_user ON artifacts(user_id, created_at DESC);
+
+-- Launch hardening: authorization gate. Before any OFFENSIVE action (scan/exploit/wireless/
+-- bluetooth/owasp, or a raw shell attack command) runs against an identifiable target, the
+-- OPERATOR must attest — per session, per target — that they own the asset or hold written
+-- permission (scope) to test it. The AI can never self-authorize; grants come only from an
+-- operator-issued /authorize message. This is what makes offensive tooling legitimate/deployable.
+CREATE TABLE IF NOT EXISTS target_authorizations (
+  id           TEXT PRIMARY KEY,
+  session_id   TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+  user_id      TEXT REFERENCES users(id) ON DELETE CASCADE,
+  target       TEXT NOT NULL,                   -- normalized IP/CIDR/host/URL-host/MAC
+  scope_note   TEXT,                            -- operator's stated authority (client, PO#, lab)
+  revoked      BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_targetauth_uniq ON target_authorizations(session_id, target);
+CREATE INDEX IF NOT EXISTS idx_targetauth_user ON target_authorizations(user_id, created_at DESC);
+
+-- Tamper-evident audit trail: every offensive action the gate evaluated (allowed or blocked),
+-- with who/when/what/against-which-target. This is the accountability record a serious
+-- (enterprise/government) deployment needs.
+CREATE TABLE IF NOT EXISTS authz_events (
+  id           TEXT PRIMARY KEY,
+  session_id   TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+  user_id      TEXT REFERENCES users(id) ON DELETE CASCADE,
+  action_type  TEXT NOT NULL,                   -- scan | vulnscan | exploit | wireless | bluetooth | owasp | execute
+  target       TEXT,
+  command      TEXT,
+  decision     TEXT NOT NULL,                   -- allowed | blocked
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_authzev_session ON authz_events(session_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_authzev_user ON authz_events(user_id, created_at DESC);

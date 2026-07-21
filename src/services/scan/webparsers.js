@@ -88,19 +88,27 @@ export function parseSqlmap(text, source = 'sqlmap') {
 // nikto: lines starting with "+ " are findings.
 export function parseNikto(text, source = 'nikto') {
   const out = [];
+  // Operational/banner/noise lines nikto emits with the "+ " prefix that are NOT findings. Covers nikto
+  // 2.6.0 output (numeric [NNNNNN] ids replaced OSVDB) — without this filter these pollute the findings list.
+  const NOISE =
+    /^(Target|Start Time|End Time|Server:|SSL Info|Nikto v|host\(s\) tested|\d+ host\(s\)|Multiple IPs found|No CGI Directories|ERROR:|Scan terminated|\d+ item|Root page|Allowed HTTP Methods|The anti-clickjacking|The X-XSS-Protection|Retrieved|RFIURL|Cookie|=+$|-+$)/i;
   for (const raw of String(text).split('\n')) {
     const line = raw.trim();
     if (!line.startsWith('+ ')) continue;
     const body = line.slice(2).trim();
-    if (/^(Target|Start Time|End Time|Server:|SSL Info|host\(s\) tested)/i.test(body)) continue;
+    if (!body || NOISE.test(body)) continue;
     const osvdb = /OSVDB-\d+/i.exec(body)?.[0];
+    const niktoId = /^\[(\d{5,7})\]/.exec(body)?.[1]; // nikto 2.6.0 finding id
+    // strip the leading [id] and path prefix so titles read cleanly
+    const clean = body.replace(/^\[\d{5,7}\]\s*/, '');
     out.push({
       finding_type: 'misconfiguration',
-      severity: /xss|sql|rce|traversal|disclosure|injection/i.test(body) ? 'medium' : 'low',
-      title: body.slice(0, 160),
+      severity: /xss|sqli?|rce|traversal|disclosure|injection|remote file|command exec/i.test(body) ? 'medium'
+        : /outdated|missing|misconfigur|multiviews|default|backup|directory index|listing/i.test(body) ? 'low' : 'low',
+      title: clean.slice(0, 160),
       evidence: body.slice(0, 500),
       cve: extractCVEs(body).join(', ') || null,
-      source: osvdb ? `${source} (${osvdb})` : source,
+      source: osvdb ? `${source} (${osvdb})` : niktoId ? `${source} (#${niktoId})` : source,
     });
   }
   return dedupeByTitle(out);
@@ -133,6 +141,9 @@ export function detectWebScanner(command = '') {
   if (/\bsqlmap\b/.test(c)) return 'sqlmap';
   if (/\bnikto\b/.test(c)) return 'nikto';
   if (/\bdalfox\b/.test(c)) return 'dalfox';
+  // ZAP (Burp-Scanner CLI equivalent) — recognised so ```vulnscan runs the command as-is instead of
+  // wrapping it in nuclei. Its findings are extracted separately by parseZap in runAndCapture.
+  if (/\bzap-baseline|zap-full-scan|zap-api-scan|zap\.sh|zaproxy|zap-cli\b/.test(c)) return 'zap';
   return null;
 }
 

@@ -8,14 +8,18 @@ import { chatRouter } from './routes/chat.js';
 import { terminalRouter } from './routes/terminal.js';
 import { webRouter } from './routes/web.js';
 import { filesRouter } from './routes/files.js';
+import { voiceRouter } from './routes/voice.js';
 import { memoryRouter } from './routes/memory.js';
 import { sandboxRouter } from './routes/sandbox.js';
 import { findingsRouter, findingItemRouter } from './routes/findings.js';
 import { payloadsRouter } from './routes/payloads.js';
 import { reportsRouter, reportItemRouter } from './routes/reports.js';
+import { artifactsRouter, artifactItemRouter } from './routes/artifacts.js';
 import { publicPlansRouter, billingRouter, cashfreeWebhook } from './routes/billing.js';
 import { adminRouter } from './routes/admin.js';
 import { toolsRouter } from './routes/tools.js';
+import { legalRouter, consentRouter } from './routes/legal.js';
+import { supportRouter } from './routes/support.js';
 
 export function createApp() {
   const app = express();
@@ -54,22 +58,29 @@ export function createApp() {
   app.use('/api/auth', authRouter);
   // Public pricing (plans) — visible pre-login.
   app.use('/api/plans', publicPlansRouter);
+  // Public legal docs (consent gate renders them); consent recording is authed.
+  app.use('/api/legal', legalRouter);
+  app.use('/api/consent', consentRouter);
 
   // Everything below has a current user attached.
   app.use('/api', currentUser);
   app.use('/api/billing', billingRouter);
+  app.use('/api/support', supportRouter);
   app.use('/api/admin', adminRouter);
   app.use('/api/tools', toolsRouter);
   app.use('/api/sessions', sessionsRouter);
   app.use('/api/sessions', findingsRouter);
   app.use('/api/sessions', reportsRouter);
+  app.use('/api/sessions', artifactsRouter);
   app.use('/api/findings', findingItemRouter);
   app.use('/api/payloads', payloadsRouter);
   app.use('/api/reports', reportItemRouter);
+  app.use('/api/artifacts', artifactItemRouter);
   app.use('/api/chat', chatRouter);
   app.use('/api/terminal', terminalRouter);
   app.use('/api/web', webRouter);
   app.use('/api/files', filesRouter);
+  app.use('/api/voice', voiceRouter);
   app.use('/api/memory', memoryRouter);
   app.use('/api/sandbox', sandboxRouter);
 

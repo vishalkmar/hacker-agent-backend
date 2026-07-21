@@ -27,7 +27,37 @@ RUN apt-get update \
       || { echo ">> retry 3…"; sleep 15; apt-get update; apt-get install -y --no-install-recommends kali-linux-default; } ) \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# 3) apt-file index for doc extraction (non-fatal).
+# 3) OSINT arsenal that isn't in kali-linux-default: PhoneInfoga (Go binary — NOT a pip pkg), plus the pipx
+#    people-recon tools. Pre-baking these makes the ```osint sweep instant & reliable (no 60s runtime install).
+RUN cd /tmp \
+ && (curl -fsSL https://raw.githubusercontent.com/sundowndev/phoneinfoga/master/support/scripts/install | bash \
+      && install -m755 ./phoneinfoga /usr/local/bin/phoneinfoga) || true \
+ && pip install --break-system-packages holehe maigret h8mail sherlock-project theHarvester >/dev/null 2>&1 || true \
+ && phoneinfoga version || true
+
+# 3b) Pre-download nuclei templates (~13k). Without this the FIRST scan finds nothing (empty templates dir).
+#     Baking them makes ```vulnscan work instantly and offline-ish. Non-fatal if the download is unavailable.
+RUN nuclei -update-templates -silent 2>/dev/null || true; \
+    echo "nuclei templates: $(find /root -path '*nuclei-templates*' -name '*.yaml' 2>/dev/null | wc -l)"
+
+# 3c) BeEF (Browser Exploitation Framework). The Kali package's Ruby gem set is modern (activerecord 8,
+#     sinatra 4, sqlite3 2.7, eventmachine…) and NOT satisfied by apt alone — it needs `bundle install`,
+#     which compiles native gems (a slow ONE-TIME build step; runtime is then instant). Sets creds beef:beef.
+#     Non-fatal so a slow/failed bundle never breaks the whole image.
+RUN apt-get update \
+ && apt-get install -y beef-xss build-essential ruby-dev bundler libssl-dev libpcap-dev \
+ && ( cd /usr/share/beef-xss \
+      && bundle config set --local frozen false \
+      && bundle install \
+      && sed -i 's/passwd: *".*"/passwd: "CypherM1nd!"/; s/user: *".*"/user: "beef"/' config.yaml \
+      && echo "beef: gems installed" ) || echo "WARN: beef bundle install incomplete — run 'cd /usr/share/beef-xss && bundle install' in the container" \
+ ; apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 3d) OWASP ZAP — the CLI/headless Burp-Scanner equivalent (`zaproxy -cmd -quickurl <url> -quickout f.json`).
+#     Burp Community is GUI-only; ZAP gives real headless scanning. (mitmproxy/ffuf/wfuzz already in the base.)
+RUN apt-get update && apt-get install -y zaproxy && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 4) apt-file index for doc extraction (non-fatal).
 RUN apt-get update && apt-file update || true; apt-get clean; rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace

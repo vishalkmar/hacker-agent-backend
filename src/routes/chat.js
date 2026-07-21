@@ -8,6 +8,7 @@ import { getFile } from '../db/files.repo.js';
 import { renderFileContext } from '../services/files/analyze.js';
 import { recallMemories, storeMemories } from '../db/memory.repo.js';
 import { checkAndCountMessage } from '../services/auth/auth.js';
+import { handleAuthzCommand } from '../services/authz/authz.js';
 
 export const chatRouter = Router();
 
@@ -30,6 +31,30 @@ chatRouter.post('/:sessionId', async (req, res) => {
 
   const content = (req.body?.content || '').toString().trim();
   if (!content) return res.status(400).json({ error: 'content is required' });
+
+  // Operator authorization commands (/authorize, /revoke, /authorizations) are handled directly —
+  // NOT sent to the AI (it must never self-authorize) and NOT counted against the message quota.
+  // This is the human-in-the-loop scope grant that unblocks the offensive-tool authorization gate.
+  const authzReply = await handleAuthzCommand(content, { sessionId: session.id, userId: req.userId });
+  if (authzReply !== null) {
+    await addMessage({ sessionId: session.id, userId: req.userId, role: 'user', content });
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.flushHeaders?.();
+    const emit = (event, data) => {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+    emit('delta', { text: authzReply });
+    const saved = await addMessage({ sessionId: session.id, userId: req.userId, role: 'assistant', content: authzReply });
+    await touchSession(session.id);
+    emit('done', { message: saved });
+    return res.end();
+  }
 
   // Enforce per-plan daily message limit (resets daily).
   const quota = await checkAndCountMessage(req.userId);
@@ -66,6 +91,7 @@ chatRouter.post('/:sessionId', async (req, res) => {
   res.flushHeaders?.();
 
   const send = (event, data) => {
+    if (res.writableEnded) return; // client disconnected — don't write after end
     res.write(`event: ${event}\n`);
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
@@ -116,6 +142,11 @@ chatRouter.post('/:sessionId', async (req, res) => {
           signal: ac.signal,
           onDelta: (text) => send('delta', { text }),
         });
+
+    // User stopped before anything meaningful was generated — don't persist an empty turn.
+    if (ac.signal.aborted && (!full || full === '(no response)')) {
+      return res.end();
+    }
 
     const saved = await addMessage({
       sessionId: session.id,
