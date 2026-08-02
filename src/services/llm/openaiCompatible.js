@@ -20,6 +20,9 @@ function thinkingKwargs(model) {
 //
 // onDelta(textChunk) is called for every streamed token chunk.
 // Returns the full assistant text once a model completes.
+// The model that served the most recent completed request (for logging / UI "answered by" badges).
+export let lastServedModel = null;
+
 export async function streamOpenAICompatible({ messages, onDelta, signal }) {
   const { chain, temperature, maxTokens, firstTokenTimeoutMs } = env.llm;
   if (!chain.length) throw new Error('No LLM model configured (set LLM_MODELS or LLM_1_MODEL)');
@@ -45,7 +48,10 @@ export async function streamOpenAICompatible({ messages, onDelta, signal }) {
         // to take as long as it needs (there's no further fallback).
         allowFailover: !isLast,
       });
-      if (i > 0) console.log(`[llm] served by fallback model "${model}"`);
+      // Always announce which model actually served this request, and at what priority — so it's
+      // never a mystery which brain answered (esp. after a silent failover from a slow #1).
+      console.log(`[llm] ✔ served by "${model}" (priority #${i + 1} of ${chain.length})${i > 0 ? ' — after failover' : ''}`);
+      lastServedModel = { model, priority: i + 1, baseUrl };
       return text;
     } catch (e) {
       // User cancelled — do NOT fail over, just stop.
@@ -70,14 +76,19 @@ async function streamOne({ url, apiKey, model, messages, temperature, maxTokens,
   let firstTokenSeen = false;
   let timedOut = false;
   let timer = null;
+  let lastActivity = Date.now();
   let full = ''; // declared here so the catch block can return partial output on user-abort
+  // Idle-stall guard: fires if NO token arrives for firstTokenTimeoutMs — this covers BOTH the
+  // first-token hang AND a mid-stream freeze (e.g. a free/rate-limited endpoint that emits a couple
+  // tokens then stalls forever). Each token resets the clock. The last model gets no guard (there's
+  // nothing left to fail over to, so let it take as long as it needs).
   if (allowFailover) {
-    timer = setTimeout(() => {
-      if (!firstTokenSeen) {
+    timer = setInterval(() => {
+      if (Date.now() - lastActivity >= firstTokenTimeoutMs) {
         timedOut = true;
         ac.abort();
       }
-    }, firstTokenTimeoutMs);
+    }, 1000);
   }
 
   try {
@@ -128,9 +139,11 @@ async function streamOne({ url, apiKey, model, messages, temperature, maxTokens,
           // Reasoning models may stream thinking here first — count it as "alive" so the
           // hang timer doesn't fire, but only the real `content` becomes the answer.
           const thinking = delta.reasoning_content || '';
-          if ((piece || thinking) && !firstTokenSeen) {
+          // Any token (real content OR streamed thinking) counts as "alive" and resets the idle
+          // clock, so the stall guard only fires on a genuine freeze — not on a slow-but-working model.
+          if (piece || thinking) {
             firstTokenSeen = true;
-            if (timer) { clearTimeout(timer); timer = null; }
+            lastActivity = Date.now();
           }
           if (piece) {
             full += piece;
@@ -146,13 +159,15 @@ async function streamOne({ url, apiKey, model, messages, temperature, maxTokens,
     if (!full && allowFailover) throw new Error('empty response');
     return full;
   } catch (e) {
-    if (timedOut) throw new Error(`no first token in ${firstTokenTimeoutMs}ms (hang)`);
+    if (timedOut) throw new Error(firstTokenSeen
+      ? `stalled mid-stream (no token for ${firstTokenTimeoutMs}ms)`
+      : `no first token in ${firstTokenTimeoutMs}ms (hang)`);
     // User pressed Stop / disconnected mid-stream — keep what we already generated so the
     // caller can persist it (otherwise a stopped answer vanishes on refresh). Don't fail over.
     if (outerSignal?.aborted) return full;
     throw e;
   } finally {
-    if (timer) clearTimeout(timer);
+    if (timer) clearInterval(timer);
     if (outerSignal) outerSignal.removeEventListener('abort', relay);
   }
 }

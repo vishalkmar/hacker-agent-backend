@@ -9,8 +9,10 @@ import { terminalRouter } from './routes/terminal.js';
 import { webRouter } from './routes/web.js';
 import { filesRouter } from './routes/files.js';
 import { voiceRouter } from './routes/voice.js';
+import { jobsRouter } from './routes/jobs.js';
 import { memoryRouter } from './routes/memory.js';
 import { sandboxRouter } from './routes/sandbox.js';
+import { capabilitiesRouter } from './routes/capabilities.js';
 import { findingsRouter, findingItemRouter } from './routes/findings.js';
 import { payloadsRouter } from './routes/payloads.js';
 import { reportsRouter, reportItemRouter } from './routes/reports.js';
@@ -24,7 +26,9 @@ import { supportRouter } from './routes/support.js';
 export function createApp() {
   const app = express();
 
-  app.use(cors({ origin: env.corsOrigins, credentials: true }));
+  // Web: restrict to configured origins. Desktop (Phase D2): the renderer loads from file:// (Origin: null)
+  // or the Vite dev origin and talks to 127.0.0.1:<port>; the backend is loopback-only, so reflect any origin.
+  app.use(cors({ origin: env.desktop ? true : env.corsOrigins, credentials: true }));
 
   // Cashfree webhook needs the RAW body for signature verification — mount before json parser.
   app.post('/api/billing/webhook', express.raw({ type: '*/*' }), cashfreeWebhook);
@@ -54,6 +58,18 @@ export function createApp() {
     });
   });
 
+  // Phase D6 — desktop local-API gate. When embedded (CYPHERMIND_DESKTOP=true) with a per-launch secret,
+  // EVERY /api call (except the /api/health readiness poll) must present the matching X-CypherMind-Local
+  // header. This binds the exec engine to our own renderer — any other local process hitting 127.0.0.1
+  // (malware, a stray script) is rejected 403 even before auth. Loopback binding + this secret = the guard.
+  if (env.desktop && env.localApiSecret) {
+    app.use((req, res, next) => {
+      if (!req.path.startsWith('/api') || req.path === '/api/health') return next();
+      if ((req.headers['x-cyphermind-local'] || '') === env.localApiSecret) return next();
+      return res.status(403).json({ error: 'Local API access denied' });
+    });
+  }
+
   // Public auth routes (register/login) — no user required.
   app.use('/api/auth', authRouter);
   // Public pricing (plans) — visible pre-login.
@@ -81,8 +97,10 @@ export function createApp() {
   app.use('/api/web', webRouter);
   app.use('/api/files', filesRouter);
   app.use('/api/voice', voiceRouter);
+  app.use('/api/jobs', jobsRouter);
   app.use('/api/memory', memoryRouter);
   app.use('/api/sandbox', sandboxRouter);
+  app.use('/api/capabilities', capabilitiesRouter);
 
   // 404 + error handlers.
   app.use((_req, res) => res.status(404).json({ error: 'Not found' }));

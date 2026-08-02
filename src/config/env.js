@@ -58,6 +58,16 @@ function defaultShell() {
 export const env = {
   port: num(process.env.PORT, 8787),
   nodeEnv: process.env.NODE_ENV || 'development',
+  // Phase D2: true when embedded in the Electron desktop app (spawned with CYPHERMIND_DESKTOP=true).
+  // The backend is then bound to 127.0.0.1 and only the local renderer talks to it → CORS can be permissive.
+  desktop: bool(process.env.CYPHERMIND_DESKTOP, false),
+  // Phase D3: the deployed web API the desktop trusts for login/entitlement. When the embedded backend can't
+  // verify a JWT locally (no shared JWT_SECRET), it validates the token against `${webApiUrl}/api/auth/me`.
+  webApiUrl: (process.env.WEB_API_URL || '').replace(/\/+$/, ''),
+  // Phase D6: per-launch shared secret between the Electron renderer and this embedded backend. When set
+  // (desktop only), every /api call must carry it in the X-CypherMind-Local header — so no OTHER local
+  // process on 127.0.0.1 can drive the exec engine, only our own renderer that was handed the secret.
+  localApiSecret: process.env.LOCAL_API_SECRET || '',
   corsOrigins: (process.env.CORS_ORIGIN || 'http://localhost:5173')
     .split(',')
     .map((s) => s.trim())

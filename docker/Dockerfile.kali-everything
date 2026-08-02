@@ -58,6 +58,18 @@ RUN apt-get update \
 # OWASP ZAP — CLI/headless Burp-Scanner equivalent (zaproxy -cmd -quickurl).
 RUN apt-get update && apt-get install -y zaproxy && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Bluetooth stack + bluesnarfer (BlueSnarf attack) — needs a real BT radio at runtime (auto-detected).
+RUN apt-get update && apt-get install -y bluez bluez-tools bluesnarfer libbluetooth3 && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# SET (Social-Engineer Toolkit) — credential-harvester/phishing/QR/payload framework (driven non-interactively).
+RUN apt-get update && apt-get install -y set && mkdir -p /root/.set && echo y > /root/.set/set.agreement && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Hound (geolocation + device recon) deps + clone — starts a PHP page behind a cloudflared tunnel.
+RUN apt-get update && apt-get install -y php-cli wget unzip && git clone --depth 1 https://github.com/techchipnet/hound /root/hound && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# CamPhish (webcam-grab + geolocation phishing) — clone (deps php/wget/unzip already installed above).
+RUN git clone --depth 1 https://github.com/techchipnet/CamPhish /root/CamPhish
+
 WORKDIR /workspace
 
 # Keep the container alive so the app can `docker exec` into it.

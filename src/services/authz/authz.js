@@ -14,7 +14,7 @@ import { query, newId } from '../../db/index.js';
 // Dedicated offensive tool-block types — always gated when they name a target. `cloud` is gated in
 // DOMAIN mode (it actively probes a remote target's buckets/exposed files); credentialed CSPM
 // (`cloud aws|azure|gcp`) carries no target host, so classifyAction leaves it ungated (creds = auth).
-const OFFENSIVE_TYPES = new Set(['scan', 'vulnscan', 'wireless', 'bluetooth', 'exploit', 'owasp', 'cloud', 'websecrets', 'buckets', 'defaultcreds', 'exposed', 'firewall', 'svcaudit', 'webinput', 'apidiscover', 'authsession', 'loginbypass']);
+const OFFENSIVE_TYPES = new Set(['scan', 'vulnscan', 'wireless', 'bluetooth', 'ghost', 'ad', 'exploit', 'owasp', 'cloud', 'websecrets', 'buckets', 'defaultcreds', 'exposed', 'firewall', 'svcaudit', 'webinput', 'apidiscover', 'authsession', 'loginbypass']);
 
 // Raw shell (`execute`) is gated only when the command drives one of these attack tools (so benign
 // shell — ls, cat, whoami, ping, curl to your own infra — is never gated). msfvenom/payload gen is
