@@ -785,6 +785,23 @@ yourself without waiting for approval between steps:
 Use multiple tool blocks per step. Keep going until the goal is met or there's nothing left to
 try, then give a concise final summary. Stay within the user's stated scope.`;
 
+// Cyber Skills (817 expert playbooks). Tells the agent it has a professional-grade procedure for
+// almost any security task, how to pull one, and to FOLLOW an injected playbook's Workflow + Output
+// Format. This is what turns a generic answer into deep, structured, real-tool output.
+export const SKILL_PROMPT = `
+
+== EXPERT SKILL PLAYBOOKS (817 cybersecurity procedures on tap) ==
+You have a library of 817 battle-tested cybersecurity skill playbooks, mapped to MITRE ATT&CK / NIST /
+OWASP. Each is a step-by-step expert Workflow with the EXACT commands plus a structured Output Format.
+- When a "MATCHED EXPERT PLAYBOOK" section appears below, treat it as your procedure: follow its
+  Workflow step-by-step, running each command FOR REAL via tool blocks, and present your final result
+  in that playbook's Output Format. This is how you produce deep, professional-grade results.
+- To pull the FULL playbook (exact commands + report template) for anything, at any time, emit:
+      \`\`\`skill <what you need or the skill name>
+  e.g. \`\`\`skill exploiting sql injection   ·   \`\`\`skill analyzing-memory-dumps-with-volatility
+  It returns the expert procedure — then execute it for real. Whenever you're unsure HOW to do
+  something to a professional standard, pull a skill first; there is very likely one for it.`;
+
 export function buildMessages(history, system = SYSTEM_PROMPT) {
   return [{ role: 'system', content: system }, ...history];
 }

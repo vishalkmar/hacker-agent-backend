@@ -58,7 +58,13 @@ export function buildReconScan(target, { deep = false } = {}) {
     `echo "=== SUBDOMAINS ===";`,
     `subs=$(mktemp);`,
     `curl -s -k -m 20 "https://crt.sh/?q=%25.$D&output=json" 2>/dev/null | jq -r '.[].name_value' 2>/dev/null | tr 'A-Z' 'a-z' | sed 's/^\\*\\.//' | grep -E "\\.$D\\$|^$D\\$" >> "$subs" 2>/dev/null || true;`,
-    `for w in ${SUB_WORDS}; do echo "$w.$D"; done >> "$subs";`,
+    // Wildcard-DNS guard: a random label that cannot exist — if it STILL resolves, the zone is wildcard
+    // (e.g. *.vercel.app / *.netlify.app / *.onrender.com) and wordlist "resolution" is meaningless (every
+    // label resolves). Only then do we add the brute-force wordlist; otherwise it produces dozens of
+    // false-positive "sensitive subdomain exposed" findings. Certificate-transparency (crt.sh) subs are
+    // real either way, so they're always kept.
+    `wild=$(dig +short "zz-nx-$RANDOM$RANDOM.$D" A 2>/dev/null | grep -E '^[0-9.]+$' | head -1);`,
+    `if [ -z "$wild" ]; then for w in ${SUB_WORDS}; do echo "$w.$D"; done >> "$subs"; else emit info wildcard-dns "Wildcard DNS on *.$D — wordlist subdomain brute-force suppressed" "every label resolves (wildcard), so only certificate-transparency subdomains are treated as real assets" "$D"; fi;`,
     `sort -u "$subs" -o "$subs";`,
     // resolve each candidate (parallel) -> keep only live ones as "SUB <host> <ip>"
     `resolve(){ ip=$(dig +short "$1" A 2>/dev/null | grep -E '^[0-9.]+$' | head -1); [ -n "$ip" ] && printf 'SUB\\t%s\\t%s\\n' "$1" "$ip"; };`,
@@ -106,6 +112,7 @@ const TYPE_META = {
   'email-spf': { cwe: 'CWE-290', fix: 'Publish an SPF TXT record (v=spf1 …) listing authorized senders and ending in -all/~all.' },
   'email-dmarc': { cwe: 'CWE-290', fix: 'Publish a DMARC record at _dmarc (v=DMARC1; p=reject/quarantine) to stop email spoofing/phishing.' },
   'sensitive-sub': { cwe: 'CWE-200', fix: 'Non-production/internal subdomains should not be publicly resolvable — put them behind a VPN/allow-list or split-horizon DNS.' },
+  'wildcard-dns': { cwe: '', fix: 'Informational — the platform (Vercel/Netlify/etc.) resolves all subdomains via a wildcard, so wordlist brute-forcing is unreliable here; rely on certificate-transparency + HTTP liveness instead.' },
   'tech-disclosure': { cwe: 'CWE-200', fix: 'Remove version-revealing headers (Server, X-Powered-By) so you do not advertise the exact stack/version to attackers.' },
 };
 

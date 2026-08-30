@@ -20,6 +20,7 @@ import { artifactsRouter, artifactItemRouter } from './routes/artifacts.js';
 import { publicPlansRouter, billingRouter, cashfreeWebhook } from './routes/billing.js';
 import { adminRouter } from './routes/admin.js';
 import { toolsRouter } from './routes/tools.js';
+import { skillsRouter } from './routes/skills.js';
 import { legalRouter, consentRouter } from './routes/legal.js';
 import { supportRouter } from './routes/support.js';
 
@@ -84,6 +85,7 @@ export function createApp() {
   app.use('/api/support', supportRouter);
   app.use('/api/admin', adminRouter);
   app.use('/api/tools', toolsRouter);
+  app.use('/api/skills', skillsRouter);
   app.use('/api/sessions', sessionsRouter);
   app.use('/api/sessions', findingsRouter);
   app.use('/api/sessions', reportsRouter);

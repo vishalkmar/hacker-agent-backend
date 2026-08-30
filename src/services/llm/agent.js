@@ -1,6 +1,7 @@
 import { env } from '../../config/env.js';
 import { streamChat, activeModel } from './index.js';
-import { SYSTEM_PROMPT, EXEC_PROTOCOL_PROMPT, AUTOPILOT_PROMPT, EXEC_FORCE_PROMPT, THINKING_PROMPT, CONVERSATION_GUARD, VULN_FORCE_PROMPT } from './prompt.js';
+import { SYSTEM_PROMPT, EXEC_PROTOCOL_PROMPT, AUTOPILOT_PROMPT, EXEC_FORCE_PROMPT, THINKING_PROMPT, CONVERSATION_GUARD, VULN_FORCE_PROMPT, SKILL_PROMPT } from './prompt.js';
+import { retrieveSkills, getSkill, buildSkillInjection, setActiveSkill, getActiveSkill } from '../skills/index.js';
 import { renderCatalog } from '../exploit/knowledge.js';
 import { runCommand } from '../exec/runner.js';
 import { webSearch, renderSearchResults } from '../web/search.js';
@@ -76,7 +77,7 @@ commands. If a tool like nmap/sqlmap is missing, say so and adapt or install it.
 
 // EXEC_FORCE_PROMPT forces the model to actually RUN commands (via ```execute blocks) and never
 // simulate; THINKING_PROMPT makes it narrate a plan + per-step analysis so the user sees progress.
-const EXEC_SYSTEM = SYSTEM_PROMPT + EXEC_PROTOCOL_PROMPT + shellNote(env.exec.shell) + EXEC_FORCE_PROMPT + THINKING_PROMPT + CONVERSATION_GUARD;
+const EXEC_SYSTEM = SYSTEM_PROMPT + EXEC_PROTOCOL_PROMPT + shellNote(env.exec.shell) + EXEC_FORCE_PROMPT + THINKING_PROMPT + SKILL_PROMPT + CONVERSATION_GUARD;
 
 // ---- Anti-simulation guard ----
 // Fires when a step emits NO tool block but looks like it simulated output or merely listed
@@ -122,7 +123,7 @@ function trimHistory(msgs) {
 const VULN_ENGAGE_RE =
   /\b(vuln\w*|exploit\w*|cve[-\s]?\d+|cwe[-\s]?\d+|owasp|metasploit|payload|reverse[-\s]?shell|rce|lfi|rfi|sql[\s-]?inj\w*|sqli|xss|csrf|ssrf|idor|deserial\w*|priv(?:ilege)?[-\s]?esc\w*|shellshock|log4shell|eternalblue|bluekeep|proxylogon|zerologon|spring4shell|heartbleed|dirty[-\s]?(?:cow|pipe)|drupalgeddon|meltdown|spectre|follina|printnightmare|citrix[-\s]?bleed|baron[-\s]?samedit|regresshion)\b/i;
 
-const TOOL_TYPES = ['execute', 'search', 'fetch', 'recon', 'scan', 'vulnscan', 'wireless', 'bluetooth', 'ghost', 'ad', 'exploitdev', 'pwnedpass', 'mitm', 'sniff', 'osint', 'exploit', 'msf', 'set', 'hound', 'camphish', 'owasp', 'artifact', 'file', 'tool', 'browser', 'payload', 'report', 'dork', 'hashid', 'shodan',
+const TOOL_TYPES = ['execute', 'search', 'fetch', 'recon', 'scan', 'vulnscan', 'wireless', 'bluetooth', 'ghost', 'ad', 'exploitdev', 'pwnedpass', 'mitm', 'sniff', 'osint', 'exploit', 'msf', 'set', 'hound', 'camphish', 'owasp', 'artifact', 'file', 'tool', 'skill', 'browser', 'payload', 'report', 'dork', 'hashid', 'shodan',
   // AppSec / DevSecOps code-security suite (each its own tag):
   ...ALL_AREAS,
   // Cloud & infrastructure security posture (Phase 1+):
@@ -135,7 +136,7 @@ const ALL_FENCES = [...TOOL_TYPES, ...EXEC_ALIASES];
 // Parse all tool blocks in document order. Handles BOTH forms the model uses:
 //   ```fetch https://x```            (body on the same line as the info string)
 //   ```execute\nwhoami\n```          (body on following lines)
-function parseToolBlocks(text) {
+export function parseToolBlocks(text) {
   const re = new RegExp('```(' + ALL_FENCES.join('|') + ')[ \\t]*([\\s\\S]*?)```', 'g');
   const out = [];
   let m;
@@ -211,7 +212,15 @@ async function runAndCapture(command, { sessionId, userId }) {
       ...parseHound(command, out),
       ...parseCamphish(command, out),
     ];
-    if (items.length) findingsAdded = await addFindings(sessionId, userId, items.map(enrichCvss));
+    if (items.length) {
+      // Tag findings with the guiding skill's framework mapping (MITRE/NIST) so the report is
+      // ATT&CK-aligned. Only fills what a parser didn't already set; no-op when no skill is active.
+      const sk = getActiveSkill(sessionId);
+      const enriched = items.map(enrichCvss).map((f) => (sk
+        ? { ...f, mitre: f.mitre?.length ? f.mitre : sk.mitre, nist: f.nist?.length ? f.nist : sk.nist, skill: f.skill || sk.skill }
+        : f));
+      findingsAdded = await addFindings(sessionId, userId, enriched);
+    }
   } catch (e) {
     console.warn('finding extraction failed:', e.message);
   }
@@ -219,7 +228,7 @@ async function runAndCapture(command, { sessionId, userId }) {
 }
 
 // Run a single tool block; returns { label, output, exitCode, findingsAdded }.
-async function runTool({ type, body }, { sessionId, userId }) {
+export async function runTool({ type, body }, { sessionId, userId, signal }) {
   // Authorization gate: offensive actions only run against a target the operator has attested to
   // (own asset / written scope) for this session. Unauthorized → blocked here, audit-logged, and
   // NOTHING runs. The AI cannot self-authorize; only an operator `/authorize` message grants it.
@@ -335,6 +344,30 @@ async function runTool({ type, body }, { sessionId, userId }) {
       ? tools.map((t) => `${t.name}${t.category ? ` [${t.category}]` : ''}: ${(t.summary || '').slice(0, 140)}${t.example ? `\n  e.g. ${t.example}` : ''}`).join('\n')
       : '(no matching tools indexed — run the tool index build first)';
     return { label: 'tool lookup: ' + body, output, exitCode: 0 };
+  }
+
+  if (type === 'skill') {
+    // Pull an expert cybersecurity playbook (817-skill corpus): exact Workflow + Output Format. Pure
+    // knowledge retrieval (read-only), so it is NOT gated — any offensive command the agent then runs
+    // goes through its own gated tool block. Accepts an exact skill name or a natural-language need.
+    const q = (body || '').trim();
+    let sk = await getSkill(q);
+    let alts = [];
+    if (!sk) {
+      const hits = await retrieveSkills(q, 3);
+      if (!hits.length) return { label: 'skill: ' + q.slice(0, 50), output: 'No matching skill playbook found. Try different keywords (e.g. "kerberoasting", "s3 bucket", "sql injection").', exitCode: 1 };
+      sk = await getSkill(hits[0].name);
+      alts = hits.slice(1).map((h) => h.name);
+    }
+    if (!sk) return { label: 'skill: ' + q.slice(0, 50), output: 'No matching skill playbook found.', exitCode: 1 };
+    const head = `# ${sk.name}  [${sk.subdomain || 'cybersecurity'}]` + (sk.mitre?.length ? `  ·  MITRE ${sk.mitre.join(', ')}` : '');
+    const altNote = alts.length ? `\n\n_Related playbooks: ${alts.join(', ')} (pull with \`\`\`skill <name>)_` : '';
+    return {
+      label: 'skill: ' + sk.name,
+      output: head + '\n\n' + (sk.body || sk.description) + altNote +
+        '\n\n[Now FOLLOW this Workflow: run each step for real via tool blocks, then report in the Output Format above.]',
+      exitCode: 0,
+    };
   }
 
   if (type === 'browser') {
@@ -1350,6 +1383,25 @@ export async function runAgent({ history, sessionId, userId, emit, signal, memor
   } catch {
     /* retrieval is best-effort */
   }
+
+  // Cyber Skills (Phase 2): inject the matching EXPERT PLAYBOOK for this goal so the agent follows a
+  // professional, battle-tested procedure (real commands + structured Output Format) instead of a
+  // generic answer. RAG over the 817-skill corpus; best-effort so it never blocks the turn.
+  try {
+    const goal = [...history].reverse().find((m) => m.role === 'user')?.content;
+    if (goal) {
+      const inj = await buildSkillInjection(goal, { k: 4 });
+      if (inj) {
+        system += '\n\n' + inj.text;
+        emit?.('skills', { names: inj.names });
+        // Remember which playbook guides THIS session so findings recorded this turn inherit its
+        // MITRE/NIST mapping (→ framework-aligned report). Phase 6.
+        setActiveSkill(sessionId, { skill: inj.top.name, mitre: inj.top.mitre, nist: inj.top.nist });
+      }
+    }
+  } catch {
+    /* skill retrieval is best-effort */
+  }
   const maxSteps = autopilot ? env.exec.maxStepsAutopilot : env.exec.maxSteps;
   let canonical = '';
   const append = (s) => {
@@ -1414,7 +1466,7 @@ export async function runAgent({ history, sessionId, userId, emit, signal, memor
         tool.type === 'execute' ? '$ ' + firstLine : `${tool.type}: ${firstLine}`;
       emit('command', { command: intent });
 
-      const r = await runTool(tool, { sessionId, userId });
+      const r = await runTool(tool, { sessionId, userId, signal });
 
       emit('command_result', {
         command: r.label,

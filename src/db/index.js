@@ -100,6 +100,30 @@ export async function initMemory() {
       .query('CREATE INDEX IF NOT EXISTS idx_tooldocs_vec ON tool_docs USING hnsw (embedding vector_cosine_ops)')
       .catch((e) => console.warn('tool_docs hnsw index skipped:', e.message));
 
+    // Cyber Skills: RAG index of the 817 Anthropic Cybersecurity Skills playbooks (embedding dim
+    // matches EMBED_DIM). name+subdomain+description+tags are embedded for retrieval; the full SKILL.md
+    // body is stored so the agent can inject the expert Workflow + Output Format on a hit.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS skill_docs (
+        name         TEXT PRIMARY KEY,
+        subdomain    TEXT,
+        description  TEXT,
+        tags         TEXT[],
+        mitre        TEXT[],
+        nist         TEXT[],
+        body         TEXT,
+        content_hash TEXT,
+        embedding    vector(${dim}),
+        updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await pool
+      .query('CREATE INDEX IF NOT EXISTS idx_skilldocs_vec ON skill_docs USING hnsw (embedding vector_cosine_ops)')
+      .catch((e) => console.warn('skill_docs hnsw index skipped:', e.message));
+    await pool
+      .query('CREATE INDEX IF NOT EXISTS idx_skilldocs_sub ON skill_docs (subdomain)')
+      .catch(() => {});
+
     memoryReady = true;
     console.log(`Memory engine ready (pgvector, dim=${dim})`);
   } catch (e) {

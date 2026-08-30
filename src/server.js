@@ -33,6 +33,14 @@ async function main() {
   await sweep();
   setInterval(sweep, 60 * 60 * 1000).unref();
 
+  // Cyber Skills self-heal: if the 817-playbook index is empty on a fresh DB (esp. a desktop install
+  // pointing at its own database), auto-ingest once in the background — so web + desktop stay aligned
+  // with zero manual steps. No-op when already indexed; never blocks boot.
+  import('./services/skills/index.js')
+    .then(({ ensureSkillsIndexed }) => ensureSkillsIndexed())
+    .then((r) => { if (r?.indexing) console.log('[skills] index empty — auto-ingesting in background…'); })
+    .catch((e) => console.warn('[skills] ensureSkillsIndexed:', e.message));
+
   const app = createApp();
   const server = http.createServer(app);
   initSupportSocket(server, env.corsOrigins); // real-time support chat

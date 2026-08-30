@@ -8,8 +8,8 @@ export async function addFindings(sessionId, userId, items) {
     try {
       const rows = await query(
         `INSERT INTO findings
-           (id, session_id, user_id, title, finding_type, severity, host, port, protocol, service, version, evidence, source, cvss_score, cvss_vector, cve, remediation)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+           (id, session_id, user_id, title, finding_type, severity, host, port, protocol, service, version, evidence, source, cvss_score, cvss_vector, cve, remediation, mitre, nist, skill)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
          ON CONFLICT DO NOTHING
          RETURNING id`,
         [
@@ -18,6 +18,7 @@ export async function addFindings(sessionId, userId, items) {
           f.host || null, f.port ?? null, f.protocol || null,
           f.service || null, f.version || null, f.evidence || null, f.source || 'ai',
           f.cvss_score ?? null, f.cvss_vector || null, f.cve || null, f.remediation || null,
+          f.mitre?.length ? f.mitre : null, f.nist?.length ? f.nist : null, f.skill || null,
         ]
       );
       if (rows.length) n++;
@@ -31,7 +32,7 @@ export async function addFindings(sessionId, userId, items) {
 export async function listFindings(sessionId) {
   return query(
     `SELECT id, title, finding_type, severity, host, port, protocol, service, version, evidence,
-            source, status, cvss_score, cvss_vector, cve, remediation, created_at
+            source, status, cvss_score, cvss_vector, cve, remediation, mitre, nist, skill, created_at
      FROM findings WHERE session_id = $1
      ORDER BY array_position(ARRAY['critical','high','medium','low','info'], severity), created_at DESC`,
     [sessionId]

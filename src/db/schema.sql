@@ -225,6 +225,12 @@ ALTER TABLE findings ADD COLUMN IF NOT EXISTS cve         TEXT;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS remediation TEXT;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS updated_at  TIMESTAMPTZ NOT NULL DEFAULT now();
 
+-- Cyber Skills: tag each finding with the expert playbook that guided the engagement + its framework
+-- mapping, so reports are MITRE ATT&CK / NIST CSF aligned (professional pentest deliverable).
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS mitre TEXT[];
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS nist  TEXT[];
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS skill TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_findings_session ON findings(session_id, created_at DESC);
 -- Avoid duplicate identical findings within a session.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_dedup

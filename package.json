@@ -7,7 +7,16 @@
   "main": "src/server.js",
   "scripts": {
     "dev": "node --watch src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "skills:sync": "node scripts/sync-cyber-skills.mjs",
+    "skills:verify": "node scripts/verify-cyber-skills.mjs",
+    "skills:ingest": "node scripts/ingest-cyber-skills.mjs",
+    "skills:test": "node scripts/test-skills-retrieval.mjs",
+    "skills:test:agent": "node scripts/test-skills-agent.mjs",
+    "skills:test:api": "node scripts/test-skills-api.mjs",
+    "skills:test:desktop": "node scripts/test-skills-desktop.mjs",
+    "skills:test:report": "node scripts/test-skills-report.mjs",
+    "skills:test:all": "node scripts/verify-cyber-skills.mjs && node scripts/test-skills-retrieval.mjs && node scripts/test-skills-agent.mjs && node scripts/test-skills-api.mjs && node scripts/test-skills-desktop.mjs && node scripts/test-skills-report.mjs"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
