@@ -7,7 +7,7 @@ import { analyzeFile, classify } from '../services/files/analyze.js';
 import { createFile, getFile } from '../db/files.repo.js';
 
 const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const UPLOAD_DIR = path.resolve(backendRoot, 'uploads');
+const UPLOAD_DIR = path.resolve(backendRoot, process.env.UPLOAD_DIR || 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const storage = multer.diskStorage({

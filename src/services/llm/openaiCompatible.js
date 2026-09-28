@@ -100,7 +100,12 @@ async function streamOne({ url, apiKey, model, messages, temperature, maxTokens,
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model, messages, temperature, max_tokens: maxTokens, stream: true,
+        model, messages, stream: true,
+        // GPT-6 uses completion-token limits; direct answers avoid spending the
+        // first-token timeout on hidden reasoning in this streaming agent loop.
+        ...(/^gpt-6(?:-|$)/i.test(model)
+          ? { max_completion_tokens: maxTokens, reasoning_effort: 'none' }
+          : { temperature, max_tokens: maxTokens }),
         // Reasoning models stream their thinking into `reasoning_content` and sometimes leave
         // `content` empty → false "empty response" failovers. Ask them to answer directly. The
         // param differs per family, so it's model-aware (others are left untouched). Our own

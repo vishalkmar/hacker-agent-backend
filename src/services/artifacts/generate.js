@@ -16,7 +16,7 @@ import { runCommand } from '../exec/runner.js';
 // output OUTSIDE src/ matters: `npm run dev` uses `node --watch src/`, and writing generated files
 // under src/ would restart the server on every download.
 const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-export const ARTIFACT_DIR = path.resolve(backendRoot, 'artifacts');
+export const ARTIFACT_DIR = path.resolve(backendRoot, process.env.ARTIFACT_DIR || 'artifacts');
 fs.mkdirSync(ARTIFACT_DIR, { recursive: true });
 
 // Extensions we write as-is (UTF-8 text). Everything Excel/Word/PDF is handled specially.
