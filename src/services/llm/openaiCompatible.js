@@ -4,6 +4,11 @@ import { env } from '../../config/env.js';
 // name differs per family: nemotron uses `enable_thinking`, deepseek uses `thinking`. Mistral /
 // others need nothing (they already stream `content` directly), so return {} for them.
 function thinkingKwargs(model) {
+  // gpt-oss (e.g. on Groq) ALWAYS reasons into a separate channel and bills those tokens against
+  // max_tokens — with default effort it can spend the whole budget on hidden reasoning and emit no
+  // `content` at all (finish_reason=length). `reasoning_effort: low` keeps reasoning short so the
+  // real answer reliably streams. Standard param; harmless on other gpt-oss hosts.
+  if (/gpt-oss/i.test(model)) return { reasoning_effort: 'low' };
   if (!env.llm.disableThinking) return {};
   if (/nemotron/i.test(model)) return { chat_template_kwargs: { enable_thinking: false } };
   if (/deepseek/i.test(model)) return { chat_template_kwargs: { thinking: false } };
@@ -142,8 +147,10 @@ async function streamOne({ url, apiKey, model, messages, temperature, maxTokens,
           const delta = json.choices?.[0]?.delta || {};
           const piece = delta.content || '';
           // Reasoning models may stream thinking here first — count it as "alive" so the
-          // hang timer doesn't fire, but only the real `content` becomes the answer.
-          const thinking = delta.reasoning_content || '';
+          // hang timer doesn't fire, but only the real `content` becomes the answer. Different
+          // families name the channel differently: nemotron/deepseek use `reasoning_content`,
+          // Groq's gpt-oss uses `reasoning`. Treat either as a live heartbeat.
+          const thinking = delta.reasoning_content || delta.reasoning || '';
           // Any token (real content OR streamed thinking) counts as "alive" and resets the idle
           // clock, so the stall guard only fires on a genuine freeze — not on a slow-but-working model.
           if (piece || thinking) {

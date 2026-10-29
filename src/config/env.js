@@ -224,8 +224,12 @@ export const env = {
 };
 
 export function describeLlmConfig() {
-  const { provider, model, baseUrl, apiKey } = env.llm;
-  const keyState = apiKey ? 'set' : 'MISSING';
+  const { provider, model, baseUrl, apiKey, chain } = env.llm;
   if (provider === 'mock') return `LLM provider=mock (no key needed)`;
-  return `LLM provider=${provider} model=${model || '(none)'} baseUrl=${baseUrl || '(none)'} apiKey=${keyState}`;
+  if (provider === 'openai' || provider === 'nvidia') {
+    const entries = chain.map((entry, index) =>
+      `priority=#${index + 1} model=${entry.model} baseUrl=${entry.baseUrl || '(none)'} apiKey=${entry.apiKey ? 'set' : 'MISSING'}`);
+    return `LLM adapter=openai-compatible ${entries.join(' | ') || '(no models configured)'}`;
+  }
+  return `LLM provider=${provider} model=${model || '(none)'} baseUrl=${baseUrl || '(none)'} apiKey=${apiKey ? 'set' : 'MISSING'}`;
 }
